@@ -15,8 +15,8 @@ images/
 selected_patch_index/
 
 # --- 未使用・配布対象外スクリプト/文書(ファイルは実マシンに残す) ---
-README.md
 README_ADD.md
+README_old.md
 eval_cifar100.py
 eval_in100.py
 eval_stl10.py
