@@ -85,7 +85,8 @@ class ImageNetWithMasks(ImageNet):
         masks = self.mask_list[idx][:self.input_patch_num*self.block_size*self.block_size]
         target_masks = [x for x in range(196) if x not in masks ]
 
-        return img, target, torch.tensor(masks), torch.tensor(target_masks)
+        return img, target, torch.tensor(masks, dtype=torch.long), \
+            torch.tensor(target_masks, dtype=torch.long)
 
 
 def select_tokens(x, idx):
@@ -160,9 +161,12 @@ def plot_results(results, t_list, out_dir, log_scale, title):
         mean = arr.mean(axis=1)
         ax.plot(t_list, mean, marker="o", ms=4, lw=1.8, label=variant)
 
-    ax.set_xticks(t_list)
     ax.set_xlabel("observation steps t")
     ax.set_ylabel("pixel MSE (unobserved region)")
+    if len(t_list) <= 40:
+        # with very long sweeps (e.g. t_max = 196 for b=1) the full tick
+        # list would be unreadable; keep the default locator instead
+        ax.set_xticks(t_list)
     if log_scale:
         ax.set_yscale("log")
     ax.set_title(title)
@@ -436,7 +440,13 @@ if __name__ == "__main__":
 
                 x = inv(x)
                 pred_image = inv(pred_image)
-                mse = F.mse_loss(x[~mask], pred_image[~mask])
+                unobserved = ~mask
+                if unobserved.any():
+                    mse = F.mse_loss(x[unobserved], pred_image[unobserved])
+                else:
+                    # full coverage: every patch is observed, so the
+                    # unobserved-region error is vacuously zero
+                    mse = torch.zeros(())
                 results[variant][ti, n] = mse.item()
 
                 if gallery_on and ti == is_final_t and n < args.gallery_n:
