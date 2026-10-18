@@ -145,6 +145,14 @@ parser.add_argument(
     '--seed', type=int, default=None,
     help='manual seed for the random initial block (and any other stochastic '
          'operation); if omitted, behavior is unchanged (non-deterministic)')
+parser.add_argument(
+    '--batch_size', type=int, default=64,
+    help='images processed together per selection step (selection is per-'
+         'image independent, so batching does not change the selection)')
+parser.add_argument(
+    '--preload', action='store_true',
+    help='preload the normalized images into CPU RAM (~0.6 MB/image) once '
+         'so the selection loop does not re-decode image files at every step')
 
 if __name__ == "__main__":
 
@@ -259,93 +267,98 @@ if __name__ == "__main__":
 
     selected_index_list=[]
 
-    for n in tqdm(range(N)):
-        img, label = test_dataset[n]
-        img = img.unsqueeze(0)
-
-        all_index = range(196)
-
+    # ---- initial blocks ----------------------------------------------------
+    # identical to the original per-image computation: the RNG calls are
+    # made in the same per-image order, so results equal the unbatched run
+    anchors = []
+    for n in range(N):
         if args.start == 'center':
             # exact center block (rows/cols covered: center..center+b-1)
             left = top = (14 - block_size + 1) // 2
         else:
             left = random.choice(range(14-block_size+1))
             top = random.choice(range(14-block_size+1))
+        anchors.append(block_to_index(left, top, block_size, block_size))
 
-        context_indices_list = [block_to_index(left, top, block_size, block_size)]
-        target_indices_list = [all_index]
+    # optional preload: normalized images kept in CPU RAM once, so the
+    # selection loop does not re-decode the image files at every step
+    imgs = None
+    if args.preload and N > 0:
+        imgs = [test_dataset[n][0] for n in tqdm(range(N), desc="preloading", leave=False)]
 
-        context_images_list = []
-        sigma_images_list = []
+    # ---- batched sigma-based selection --------------------------------------
+    # every image's selection is independent and each step of the loop gives
+    # every active image exactly one more observed block (same context size),
+    # so all active images can be forwarded together per chunk. An image is
+    # frozen (stops observing) when no fully-unobserved b x b window remains.
+    contexts = [list(a) for a in anchors]
+    active = list(range(N))
+    full_idx = torch.arange(196, dtype=torch.long, device=device)
+    block_offsets = (torch.arange(block_size, device=device)[:, None] * 14 +
+                     torch.arange(block_size, device=device)[None, :]).reshape(-1)
 
-        for t in range(T):
+    for t in range(T):
+        if not active:
+            break
 
-            # saturation check (same terminal condition as the random variant):
-            # stop when no fully-unobserved b x b sliding window remains.
-            # Without this, argmax picks an all-(-inf) window after saturation
-            # and keeps appending blocks that overlap the observed region.
-            candidate_exists = False
-            for le in range(14-block_size+1):
-                for to in range(14-block_size+1):
-                    next_index = block_to_index(le, to, block_size, block_size)
-                    if all(x not in context_indices_list[0] for x in next_index):
-                        candidate_exists = True
-                        break
-                if candidate_exists:
-                    break
-            if not candidate_exists:
-                print(f"end @ {t+1}/{T}")
-                break
+        # -- saturation check: does a fully-unobserved b x b window remain?
+        n_before = len(active)
+        obs = torch.zeros(n_before, 196, dtype=torch.bool, device=device)
+        obs[torch.arange(n_before, device=device)[:, None],
+            torch.tensor([contexts[i] for i in active], device=device)] = True
+        overlap = F.max_pool2d(obs.float().view(n_before, 1, 14, 14),
+                               kernel_size=block_size, stride=1)
+        has_candidate = (overlap == 0).view(n_before, -1).any(dim=1)
+        obs = obs[has_candidate]
+        active = [i for p, i in enumerate(active) if has_candidate[p]]
+        if n_before - len(active) > 0:
+            print(f"end @ {t+1}/{T}: {n_before - len(active)} image(s) saturated")
+        if not active:
+            break
+
+        print(f"\r    step {t+1}/{T} (active {len(active)}/{N})",
+              end="", flush=True)
+
+        # -- one step: forward the active images in chunks and let each of
+        #    them observe its own largest-sigma block
+        for lo in range(0, len(active), args.batch_size):
+            chunk = active[lo:lo + args.batch_size]
+            if imgs is not None:
+                x = torch.stack([imgs[i] for i in chunk]).to(device)
+            else:
+                x = torch.stack([test_dataset[i][0] for i in chunk]).to(device)
+
+            mask_ctx = torch.tensor([contexts[i] for i in chunk],
+                                    dtype=torch.long, device=device)
+            mask_pred = full_idx.unsqueeze(0).repeat(len(chunk), 1)
 
             with torch.no_grad():
-                img = img.to(device)
+                feature = encoder(x, [mask_ctx])
+                sigma = sigma_head(sigma_predictor(feature,
+                                                   [mask_ctx], [mask_pred]))
+            if sigma.dim() == 3:     # (B, 196, 1) -> (B, 196)
+                sigma = sigma.squeeze(-1)
+            # observed patches never win the argmax (same as the -inf write)
+            sigma = sigma.masked_fill(obs[lo:lo + len(chunk)], -torch.inf)
 
-                mask_enc = [torch.tensor(context_indices_list).to(device)]
-                mask_pred = [torch.tensor(target_indices_list).to(device)]
-                feature = encoder(img, mask_enc)
-                sigma = sigma_head(sigma_predictor(feature, mask_enc, mask_pred))
+            # pooled sigma map, argmax per image (the same computation as
+            # select_next_block, vectorized over the batch
+            pooled = F.avg_pool2d(sigma.reshape(len(chunk), 1, 14, 14),
+                                  kernel_size=block_size, stride=1)
+            flat = pooled.reshape(len(chunk), -1)
+            best = flat.argmax(dim=1)
+            Hp, Wp = pooled.shape[-2], pooled.shape[-1]
+            tops, lefts = np.unravel_index(best.cpu().numpy(), (Hp, Wp))
+            base = (torch.tensor(tops, dtype=torch.long, device=device) * 14 +
+                    torch.tensor(lefts, dtype=torch.long, device=device))
+            blocks_all = base[:, None] + block_offsets[None, :]
 
-                # visualize
-                img = img.to("cpu")
-                sigma = sigma.to("cpu")
-                context_img = reconstruct_img_from_patch(img, context_indices_list[0])
-                # target_img = reconstruct_img_from_patch(img, target_indices_list[0])
-                sigma_img = sigma_heatmap(sigma, patch_index=torch.tensor(context_indices_list))
+            for row, i in enumerate(chunk):
+                contexts[i].extend(blocks_all[row].tolist())
 
-                context_images_list.append(context_img.squeeze().permute(1,2,0).cpu().numpy())
-                sigma_images_list.append(sigma_img.squeeze().permute(1,2,0).cpu().numpy())
+    print()
 
-
-                # select patches which has largest sigma(4*4block)
-                sigma[:, context_indices_list[0], :] = -torch.inf
-                next_index = select_next_block(sigma, k=block_size)
-                # context_indices_list = context_indices_list.tolist()
-                context_indices_list[0] = context_indices_list[0] + next_index
-
-        # # visualize saccade simulation
-        # if (n+1) % 100 == 0 or n < 10:
-        #     row_labels = ['context', 'sigma']      # 左に表示
-        #     col_labels = [f't = {i}' for i in range(0, T)]  # 上に表示
-
-        #     fig, axes = plt.subplots(2, T, figsize=(T*2, 4))
-        #     for i in range(T):
-        #         axes[0, i].imshow(context_images_list[i])
-        #         axes[0, i].axis('off')
-        #         axes[1, i].imshow(sigma_images_list[i])
-        #         axes[1, i].axis('off')
-        #         axes[0, i].set_title(col_labels[i], fontsize=10)
-
-        #     for ax, row_label in zip(axes[:,0], row_labels):
-        #         ax.set_ylabel(row_label, fontsize=12, rotation=0, labelpad=40, va='center')
-
-        #     plt.tight_layout()
-        #     plt.savefig(f"images/saccade/image_{n}.png")
-        #     plt.close()
-
-        if torch.is_tensor(context_indices_list):
-            context_indices_list = context_indices_list.tolist()
-        # print(context_indices_list)
-        selected_index_list.append(context_indices_list[0])
+    selected_index_list = contexts
 
     os.makedirs("selected_patch_index", exist_ok=True)
 
