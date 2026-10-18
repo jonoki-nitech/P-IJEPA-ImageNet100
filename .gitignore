@@ -13,6 +13,7 @@ results/
 # --- experiment outputs: run_handoff_experiments.sh で再生成 ---
 images/
 selected_patch_index/
+handoff_artifacts*.zip
 
 # --- 未使用・配布対象外スクリプト/文書(ファイルは実マシンに残す) ---
 README_ADD.md

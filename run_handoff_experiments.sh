@@ -104,4 +104,28 @@ ls -d images/rec_images_tmax32/b[1-4] 2>/dev/null
 for b in 1 2 3 4; do
     ls -d "images/rec_images_tmax32/b$b/gallery" 2>/dev/null || true
 done
+
+# -----------------------------------------------------------------------------
+# Package the artefacts into a single zip (path overridable with ZIP=<name>)
+# -----------------------------------------------------------------------------
+if [ "${SKIP_ZIP:-0}" != "1" ]; then
+    ZIP=${ZIP:-handoff_artifacts_tmax32.zip}
+    echo ""
+    echo "=== Pack artefacts into $ZIP ===================================="
+    rm -f "$ZIP"
+    "$PY" - "$ZIP" <<'PYEOF'
+import os, sys, zipfile
+zip_name = sys.argv[1]
+with zipfile.ZipFile(zip_name, "w", zipfile.ZIP_DEFLATED) as zf:
+    for root in ("images/calibration", "images/rec_images_tmax32"):
+        for dirpath, _, files in os.walk(root):
+            for f in files:
+                zf.write(os.path.join(dirpath, f))
+    for f in os.listdir("selected_patch_index"):
+        if "tmax_32_test" in f:
+            zf.write(os.path.join("selected_patch_index", f))
+print(f"created: {zip_name} ({os.path.getsize(zip_name) / 1e6:.1f} MB)")
+PYEOF
+fi
+
 exit 0
