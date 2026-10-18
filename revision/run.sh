@@ -4,11 +4,11 @@
 #
 #   Two experiments, end to end, for the hand-off run:
 #     Step 0: uncertainty (sigma) calibration           -> images/calibration/
-#     Steps 1-4: 7 selection strategies x block sizes b=1..4
+#     Steps 1-4: 8 selection strategies x block sizes b=1..4
 #               (patch selection until saturation, capped at T steps)
 #               -> per-variant index JSONs + MAE reconstruction-error vs t
 #
-#   7 strategies generated per block size:
+#   8 strategies generated per block size:
 #     selected            : sigma-based selection, random initial block
 #     start_center        : sigma-based selection, center initial block
 #     random              : random selection, random initial block
@@ -16,6 +16,9 @@
 #     fixed_center_out    : fixed, center-outward order
 #     fixed_raster        : fixed, raster order (center initial block)
 #     fixed_raster_no_center : fixed, raster order (scan order initial)
+#     ame                 : external baseline (Attention-Map Entropy;
+#                           Pardyl et al., IJCAI 2023) using the MAE decoder
+#                           attention; random initial block (seed = SEED)
 #
 #   MAE evaluation automatically truncates each variant at its observable
 #   budget (len(JSON) // b^2), aligning all strategies at the smallest
@@ -73,7 +76,7 @@ $PY calibration_eval.py --fname "$CFG" --b 4 --device "$DEVICE"
 for b in 1 2 3 4; do
 
     echo ""
-    echo "=== block size b=$b: generating 7 selection JSONs ================="
+    echo "=== block size b=$b: generating 8 selection JSONs (7 + AME) ======="
 
     $PY select_and_save_patch_index.py --fname "$CFG" --T "$T" --b "$b" --seed "$SEED" --device "$DEVICE"
     $PY select_and_save_patch_index.py --fname "$CFG" --T "$T" --b "$b" --start center --seed "$SEED" --device "$DEVICE"
@@ -82,6 +85,8 @@ for b in 1 2 3 4; do
     $PY select_and_save_patch_index_fixed.py --fname "$CFG" --T "$T" --b "$b" --mode center_out
     $PY select_and_save_patch_index_fixed.py --fname "$CFG" --T "$T" --b "$b" --mode raster
     $PY select_and_save_patch_index_fixed.py --fname "$CFG" --T "$T" --b "$b" --mode raster --init order
+    # AME baseline: random initial block (seed $SEED); min(T, 196/b^2) cap
+    $PY select_and_save_patch_index_ame.py --fname "$CFG" --T "$T" --b "$b" --seed "$SEED" --device "$DEVICE"
 
     echo ""
     echo "=== block size b=$b: MAE reconstruction error vs t ================"
