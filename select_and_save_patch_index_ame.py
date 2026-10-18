@@ -20,10 +20,13 @@
 #     entropy = sum over (heads, keys) of -a * log2(a) (nan -> 0) is computed
 #     per unobserved patch; pooled with avg_pool2d(kernel=b, stride=1), the
 #     b x b window with the largest pooled entropy is observed next;
-#   * truncation: when no fully-unobserved b x b window remains (or the T
-#     step cap, default 32, is reached), that image stops observing. The
-#     official AME allows re-observing patches; here the selection must stay
-#     duplicate-free to match the other strategies and the t-sweep protocol.
+#   * truncation: when no fully-unobserved b x b window remains — i.e. the
+#     selection runs to its natural saturation at most 196/b^2 blocks
+#     (no T cap: the maximum observable block count). The official AME
+#     allows re-observing patches; here the selection must stay
+#     duplicate-free to match the other strategies and the t-sweep
+#     protocol (the evaluation aligns all variants at their smallest
+#     budget, capped by T).
 #
 # The attention maps are obtained through the officially supported
 # output_attentions=True path of the HF decoder (no model code is modified).
@@ -137,7 +140,7 @@ def block_to_index(left, top, block_size, grid=GRID):
     return (rows[:, None] * grid + cols[None, :]).flatten().tolist()
 
 
-def select_ame(model, xs_norm, b, device, attention_layer, t_cap=32,
+def select_ame(model, xs_norm, b, device, attention_layer,
                batch_size=64, init="random", rng=None):
     """AME selection for block size b. Returns the flat observed patch lists
     per image (same JSON payload as the other selection strategies).
@@ -146,10 +149,10 @@ def select_ame(model, xs_norm, b, device, attention_layer, t_cap=32,
     seeded --seed, like the other strategies); 'zero' = the official zero
     step (decoder on mask tokens only; image-independent first block).
 
-    The per-image step cap is min(t_cap, 196 // b^2): the same T cap as the
-    other strategies (saturation usually hits first for b >= 3)."""
+    No T cap: selection runs to natural saturation (at most 196 // b^2
+    blocks; the evaluation aligns variants at their smallest budget)."""
     N = len(xs_norm)
-    max_steps = min(t_cap, N_PATCHES // (b * b))
+    max_steps = N_PATCHES // (b * b)
 
     # ---- first block ------------------------------------------------------- #
     if init == "zero":
@@ -243,9 +246,9 @@ parser.add_argument(
          'block; the official AME uses its last of 8 blocks)')
 parser.add_argument(
     '--T', type=int, default=32,
-    help='cap on observation steps (same T as the other strategies; '
-         'the per-image cap is min(T, 196/b^2), so saturation still ends '
-         'selection earlier for larger b)')
+    help='tmax label in the output filename (should match the T of the '
+         'evaluation run; selection itself always runs to saturation — '
+         'no step cap)')
 parser.add_argument(
     '--batch_size', type=int, default=64,
     help='images forwarded per step (selection is per-image independent; '
@@ -320,10 +323,10 @@ if __name__ == "__main__":
     print(f"decoder depth: {dec_depth}, attention layer: {attention_layer}")
 
     b = args.b
-    max_steps = min(args.T, N_PATCHES // (b * b))
+    max_steps = N_PATCHES // (b * b)
 
     contexts, steps = select_ame(
-        model, xs_norm, b, device, attention_layer, t_cap=args.T,
+        model, xs_norm, b, device, attention_layer,
         batch_size=args.batch_size, init=args.init, rng=rng)
     print(f"{VARIANT}: steps per image min={min(steps)}, max={max(steps)} "
           f"(cap={max_steps})")
