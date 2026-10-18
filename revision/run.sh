@@ -87,8 +87,8 @@ for b in 1 2 3 4; do
     echo ""
     echo "=== block size b=$b (t_max=$TMAX): generating 8 selection JSONs (7 + AME) ==="
 
-    $PY select_and_save_patch_index.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE"
-    $PY select_and_save_patch_index.py --fname "$CFG" --T "$TMAX" --b "$b" --start center --seed "$SEED" --device "$DEVICE"
+    $PY select_and_save_patch_index.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE" --preload
+    $PY select_and_save_patch_index.py --fname "$CFG" --T "$TMAX" --b "$b" --start center --seed "$SEED" --device "$DEVICE" --preload
     $PY select_and_save_patch_index_random.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE"
     $PY select_and_save_patch_index_random_center.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED"
     $PY select_and_save_patch_index_fixed.py --fname "$CFG" --T "$TMAX" --b "$b" --mode center_out
