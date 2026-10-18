@@ -38,6 +38,10 @@
 #   PYTHON=/path/to/python bash revision/run.sh
 #   (PY defaults to "python". Scripts auto-fall back to CPU when CUDA is
 #    unavailable, so no device flag is needed.)
+#   BATCH=<n>   forwards n images together per step (default 64); set a
+#               smaller value (e.g. 16) on GPUs with little memory. Affects
+#               the sigma selections, the AME selection and the evaluation
+#               sweep; results are independent of the batch size.
 #
 #   Requires: torch, torchvision, numpy, matplotlib, pyyaml,
 #             transformers==4.47.1, einops, tqdm, Pillow.
@@ -62,9 +66,10 @@ CFG=${CONFIG:-configs/configs.yaml}   # dataset paths; receiver default = the or
 N_PATCHES=196
 SEED=0        # seed for the stochastic strategies (sigma & random variants)
 DEVICE=${DEVICE:-cuda:0}   # override with e.g. DEVICE=cpu
+BATCH=${BATCH:-64}         # images forwarded together per step (GPU memory knob)
 
 echo "python : $($PY --version 2>&1)"
-echo "config : $CFG   patches=$N_PATCHES   seed=$SEED   device=$DEVICE"
+echo "config : $CFG   patches=$N_PATCHES   seed=$SEED   batch=$BATCH   device=$DEVICE"
 
 # -----------------------------------------------------------------------------
 # Step 0: calibration of the sigma predictor
@@ -87,8 +92,8 @@ for b in 1 2 3 4; do
     echo ""
     echo "=== block size b=$b (t_max=$TMAX): generating 8 selection JSONs (7 + AME) ==="
 
-    $PY select_and_save_patch_index.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE" --preload
-    $PY select_and_save_patch_index.py --fname "$CFG" --T "$TMAX" --b "$b" --start center --seed "$SEED" --device "$DEVICE" --preload
+    $PY select_and_save_patch_index.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE" --preload --batch_size "$BATCH"
+    $PY select_and_save_patch_index.py --fname "$CFG" --T "$TMAX" --b "$b" --start center --seed "$SEED" --device "$DEVICE" --preload --batch_size "$BATCH"
     $PY select_and_save_patch_index_random.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE"
     $PY select_and_save_patch_index_random_center.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED"
     $PY select_and_save_patch_index_fixed.py --fname "$CFG" --T "$TMAX" --b "$b" --mode center_out
@@ -97,14 +102,14 @@ for b in 1 2 3 4; do
     # AME baseline: random initial block (--seed); runs to natural
     # saturation on its own (--T only labels the output filename
     # consistently with the in-house strategies)
-    $PY select_and_save_patch_index_ame.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE"
+    $PY select_and_save_patch_index_ame.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE" --batch_size "$BATCH"
 
     echo ""
     echo "=== block size b=$b: MAE reconstruction error vs t ================"
     # --preload keeps the (normalized) images in CPU RAM during the sweep
     # (~0.6 MB per image; omit on low-RAM machines)
     $PY test_mae_vs_t.py --fname "$CFG" --T "$TMAX" --b "$b" --device "$DEVICE" --preload \
-        --out_dir "images/rec_images_full/b$b"
+        --batch_size "$BATCH" --out_dir "images/rec_images_full/b$b"
 
 done
 
