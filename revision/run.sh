@@ -109,7 +109,7 @@ done
 # Package the artefacts into a single zip (path overridable with ZIP=<name>)
 # -----------------------------------------------------------------------------
 if [ "${SKIP_ZIP:-0}" != "1" ]; then
-    ZIP=${ZIP:-handoff_artifacts_tmax32.zip}
+    ZIP=${ZIP:-result.zip}
     echo ""
     echo "=== Pack artefacts into $ZIP ===================================="
     rm -f "$ZIP"
