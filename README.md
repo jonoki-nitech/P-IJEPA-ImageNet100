@@ -9,7 +9,7 @@ https://huggingface.co/jonoki-nitech/probabilistic_I-JEPA ("Files and Versions" 
 
 ```bash
 conda activate <環境名>
-DEVICE=cuda:0 bash run_handoff_experiments.sh 2>&1 | tee run.log
+DEVICE=cuda:0 bash revision/run.sh 2>&1 | tee run.log
 ```
 
 ## 成果物の保存先

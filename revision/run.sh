@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_handoff_experiments.sh
+# revision/run.sh
 #
 #   Two experiments, end to end, for the hand-off run:
 #     Step 0: uncertainty (sigma) calibration           -> images/calibration/
@@ -26,7 +26,7 @@
 #   T=10 results in images/rec_images/b{b}/ are left untouched.
 #
 # Usage:
-#   PYTHON=/path/to/python bash run_handoff_experiments.sh
+#   PYTHON=/path/to/python bash revision/run.sh
 #   (PY defaults to "python". Scripts auto-fall back to CPU when CUDA is
 #    unavailable, so no device flag is needed.)
 #

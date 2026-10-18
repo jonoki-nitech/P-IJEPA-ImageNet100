@@ -10,7 +10,7 @@ tmp.png
 data/
 results/
 
-# --- experiment outputs: run_handoff_experiments.sh で再生成 ---
+# --- experiment outputs: revision/run.sh で再生成 ---
 images/
 selected_patch_index/
 handoff_artifacts*.zip
