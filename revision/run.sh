@@ -101,7 +101,9 @@ for b in 1 2 3 4; do
 
     echo ""
     echo "=== block size b=$b: MAE reconstruction error vs t ================"
-    $PY test_mae_vs_t.py --fname "$CFG" --T "$TMAX" --b "$b" --device "$DEVICE" \
+    # --preload keeps the (normalized) images in CPU RAM during the sweep
+    # (~0.6 MB per image; omit on low-RAM machines)
+    $PY test_mae_vs_t.py --fname "$CFG" --T "$TMAX" --b "$b" --device "$DEVICE" --preload \
         --out_dir "images/rec_images_full/b$b"
 
 done

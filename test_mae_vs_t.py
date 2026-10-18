@@ -97,6 +97,10 @@ def select_tokens(x, idx):
 
 
 def visualize_rec_image(img, rec_patches, target_mask):
+    """Composite rec_patches into img at the target(-unobserved) patch
+    positions. Batched: all rows of target_mask must have the same number
+    of entries (true throughout the sweep because t <= every variant's
+    observable budget)."""
     patchify = Rearrange("b c (h p1) (w p2) -> b (h w) (p1 p2 c)",
                 p1=16,
                 p2=16)
@@ -105,7 +109,8 @@ def visualize_rec_image(img, rec_patches, target_mask):
             p2=16,
             h=14, w=14)
     img_patches = patchify(img)
-    img_patches[:, target_mask[0], :] = rec_patches
+    idx = target_mask.unsqueeze(-1).expand(-1, -1, img_patches.shape[-1])
+    img_patches.scatter_(1, idx, rec_patches)
     img_rec = unpatchify(img_patches)
 
     return img_rec
@@ -273,6 +278,14 @@ parser.add_argument(
     help='save reconstruction gallery PNGs (original / observed / each '
          "variant's reconstruction at the final t) for the first this-many "
          'samples; 0 disables')
+parser.add_argument(
+    '--batch_size', type=int, default=64,
+    help='images forwarded together per (variant, t); larger is faster but '
+         'uses more GPU memory (results are unchanged by batching)')
+parser.add_argument(
+    '--preload', action='store_true',
+    help='preload the normalized images into CPU RAM (~0.6 MB/image) once '
+         'so the sweep does not re-decode image files at every (variant, t)')
 
 if __name__ == "__main__":
 
@@ -413,10 +426,33 @@ if __name__ == "__main__":
     variants = list(datasets.keys())
     print(f"variants: {variants}, t sweep: {t_list}, images: {N}")
 
+    # ---- per-variant patch positions ---------------------------------------
+    # position of each patch in its image's observation order (the first
+    # t*b*b JSON entries are observed); 196 marks a never-observed patch.
+    # Lets us build per-image target sets vectorized instead of listing the
+    # complement for every (variant, t).
+    patch_pos = {}
+    for variant in variants:
+        pos = np.full((N, 196), 196, dtype=np.int64)
+        for i_row, ml in enumerate(variant_json_lengths[variant]):
+            for j, p in enumerate(ml):
+                pos[i_row, p] = j
+        patch_pos[variant] = pos
+
+    # optional preload: normalized images kept in CPU RAM once, so the sweep
+    # does not re-decode the image files at every (variant, t)
+    imgs = None
+    if args.preload and N > 0:
+        d0 = datasets[variants[0]]
+        imgs = [d0[i][0] for i in tqdm(range(N), desc="preloading", leave=False)]
+
     # model
     model = ViTMAEForPreTraining.from_pretrained("facebook/vit-mae-base", attn_implementation="sdpa").to(device)
 
-    # ---- sweep ------------------------------------------------------------
+    # ---- sweep (batched) ---------------------------------------------------
+    # for a fixed (variant, t) every image observes the same number of patches
+    # (t*b*b), so the forward pass can run the whole (or chunked) batch at
+    # once; results are identical to the previous per-image loop
     results = {v: np.zeros((len(t_list), N)) for v in variants}
 
     # gallery cache: filled only at the final t, for the first --gallery_n
@@ -427,12 +463,31 @@ if __name__ == "__main__":
 
     for variant in variants:
         ds = datasets[variant]
+        mlist = variant_json_lengths[variant]
+        pos = patch_pos[variant]
         for ti, t in enumerate(t_list):
-            ds.input_patch_num = t
-            for n in tqdm(range(N), desc=f"{variant} t={t}", leave=False):
-                x, y, input_mask, target_mask = ds[n]
-                x, input_mask, target_mask = x.unsqueeze(0).to(device), input_mask.unsqueeze(0).to(device), target_mask.unsqueeze(0).to(device)
-                pred, rec_patches = forward_with_mask_idx(model, x, input_mask, target_mask)
+            k = t * args.b * args.b
+            # ascending target(-unobserved) patches per image; same count for
+            # every image because t <= T_plot respects all variant budgets
+            _, patch_np = np.nonzero(pos >= k)
+            target_2d = torch.from_numpy(
+                patch_np.reshape(N, 196 - k)).to(device)
+            input_rows = [ml[:k] for ml in mlist]
+
+            for s in tqdm(range(0, N, args.batch_size),
+                          desc=f"{variant} t={t}", leave=False):
+                e = min(s + args.batch_size, N)
+                if imgs is not None:
+                    x = torch.stack(imgs[s:e])
+                else:
+                    x = torch.stack([ds[i][0] for i in range(s, e)])
+                x = x.to(device)
+                input_mask = torch.tensor(input_rows[s:e],
+                                          dtype=torch.long, device=device)
+                target_mask = target_2d[s:e]
+
+                pred, rec_patches = forward_with_mask_idx(
+                    model, x, input_mask, target_mask)
 
                 x_input = visualize_rec_image(x, torch.zeros_like(rec_patches), target_mask)
                 mask = visualize_rec_image(torch.ones_like(x, dtype=torch.bool), torch.zeros_like(rec_patches, dtype=bool), target_mask)
@@ -440,24 +495,28 @@ if __name__ == "__main__":
 
                 x = inv(x)
                 pred_image = inv(pred_image)
-                unobserved = ~mask
-                if unobserved.any():
-                    mse = F.mse_loss(x[unobserved], pred_image[unobserved])
-                else:
-                    # full coverage: every patch is observed, so the
-                    # unobserved-region error is vacuously zero
-                    mse = torch.zeros(())
-                results[variant][ti, n] = mse.item()
 
-                if gallery_on and ti == is_final_t and n < args.gallery_n:
+                # per-image MSE over unobserved pixels (mean over elements,
+                # as before); full coverage rows have a count of zero and the
+                # unobserved-region error is vacuously zero
+                unobserved = ~mask
+                counts = unobserved.sum(dim=(1, 2, 3))
+                sq = ((x - pred_image).pow(2) * unobserved).sum(dim=(1, 2, 3))
+                results[variant][ti, s:e] = (sq / counts.clamp(min=1)).cpu().numpy()
+
+                if gallery_on and ti == is_final_t:
                     # bottom-row image: MAE reconstruction with the observed
                     # patches replaced by the actual pixels
                     # (same compositing as test_mae_on_selected_patches.py)
-                    pred_gallery = pred_image.clone()
-                    pred_gallery[mask] = inv(x_input)[mask]
-                    gallery_cache["original"][n] = x.cpu()
-                    gallery_cache["observed"].setdefault(n, {})[variant] = inv(x_input).cpu()
-                    gallery_cache["rec"].setdefault(n, {})[variant] = pred_gallery.cpu()
+                    for nz in range(e - s):
+                        n = s + nz
+                        if n >= args.gallery_n:
+                            break
+                        pred_gallery = pred_image[nz].clone()
+                        pred_gallery[mask[nz]] = x[nz][mask[nz]]
+                        gallery_cache["original"][n] = x[nz].cpu()
+                        gallery_cache["observed"].setdefault(n, {})[variant] = inv(x_input[nz]).cpu()
+                        gallery_cache["rec"].setdefault(n, {})[variant] = pred_gallery.cpu()
 
     # ---- gallery PNGs (first samples, at the aligned final t) --------------
     if gallery_on:
