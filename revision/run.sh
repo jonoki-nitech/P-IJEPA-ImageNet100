@@ -90,7 +90,7 @@ for b in 1 2 3 4; do
 
     TMAX=$((N_PATCHES / b / b))   # 196/49/21/12 for b=1/2/3/4
     echo ""
-    echo "=== block size b=$b (t_max=$TMAX): generating 8 selection JSONs (7 + AME) ==="
+    echo "=== block size b=$b (t_max=$TMAX): generating 9 selection JSONs (7 + AME + lookahead) ==="
 
     $PY select_and_save_patch_index.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE" --preload --batch_size "$BATCH"
     $PY select_and_save_patch_index.py --fname "$CFG" --T "$TMAX" --b "$b" --start center --seed "$SEED" --device "$DEVICE" --preload --batch_size "$BATCH"
@@ -103,6 +103,12 @@ for b in 1 2 3 4; do
     # saturation on its own (--T only labels the output filename
     # consistently with the in-house strategies)
     $PY select_and_save_patch_index_ame.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE" --batch_size "$BATCH"
+    # 1-step lookahead: pre-screens candidates with the current sigma map
+    # (default --topk 16) and simulates only the 16 best anchors per
+    # image-step; random initial block (--seed, i.e. default --start random).
+    # NOTE: the most expensive selection (~16x the sigma selection; the
+    # b=1 sweep dominates, expect several extra hours on top of the rest)
+    $PY select_and_save_patch_index_lookahead.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE" --preload --batch_size "$BATCH"
 
     echo ""
     echo "=== block size b=$b: MAE reconstruction error vs t ================"
