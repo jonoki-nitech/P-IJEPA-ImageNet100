@@ -51,6 +51,12 @@
 #               smaller value (e.g. 16) on GPUs with little memory. Affects
 #               the sigma selections, the AME selection and the evaluation
 #               sweep; results are independent of the batch size.
+#   MAX_T=<n>   caps the selection horizon at n steps for quick smoke tests
+#               (default 0 = full t_max). The capped t_max enters the product
+#               filenames (e.g. block_1_tmax_2_*), so smoke-test outputs
+#               never collide with full-run artefacts. NOTE: the AME
+#               selection always runs to its natural saturation regardless
+#               of MAX_T (its --T only labels the filename).
 #
 #   Requires: torch, torchvision, numpy, matplotlib, pyyaml,
 #             transformers==4.47.1, einops, tqdm, Pillow.
@@ -76,6 +82,7 @@ N_PATCHES=196
 SEED=0        # seed for the stochastic strategies (sigma & random variants)
 DEVICE=${DEVICE:-cuda:0}   # override with e.g. DEVICE=cpu
 BATCH=${BATCH:-64}         # images forwarded together per step (GPU memory knob)
+MAX_T=${MAX_T:-0}          # optional cap on the per-b selection horizon (smoke tests)
 
 echo "python : $($PY --version 2>&1)"
 echo "config : $CFG   patches=$N_PATCHES   seed=$SEED   batch=$BATCH   device=$DEVICE"
@@ -98,6 +105,7 @@ $PY calibration_eval.py --fname "$CFG" --b 4 --device "$DEVICE"
 for b in 1 2 3 4; do
 
     TMAX=$((N_PATCHES / b / b))   # 196/49/21/12 for b=1/2/3/4
+    if [ "$MAX_T" -gt 0 ] && [ "$MAX_T" -lt "$TMAX" ]; then TMAX="$MAX_T"; fi
     if [ "$b" = 1 ]; then NSEL=8; else NSEL=9; fi   # + lookahead from b=2
     echo ""
     echo "=== block size b=$b (t_max=$TMAX): generating $NSEL selection JSONs (7 + AME + lookahead for b>=2) ==="
@@ -164,7 +172,8 @@ with zipfile.ZipFile(zip_name, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in files:
                 zf.write(os.path.join(dirpath, f))
     for f in os.listdir("selected_patch_index"):
-        if fnmatch.fnmatch(f, "block_*_tmax_*_test*.json"):
+        if fnmatch.fnmatch(f, "block_*_tmax_*_test*.json") or \
+           fnmatch.fnmatch(f, "stats_block_*_tmax_*_test*.json"):
             zf.write(os.path.join("selected_patch_index", f))
 print(f"created: {zip_name} ({os.path.getsize(zip_name) / 1e6:.1f} MB)")
 PYEOF
