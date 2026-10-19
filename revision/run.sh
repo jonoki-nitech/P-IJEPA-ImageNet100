@@ -29,6 +29,11 @@
 #                           candidates per image-step would roughly double
 #                           the total runtime for a modest gain)
 #
+# Initial-block alignment: all random-initial strategies below (sigma_greedy,
+# lookahead, random, ame) draw the initial blocks with the same python-random
+# stream and call order (left, then top per image), so for a given SEED their
+# initial blocks are identical for every image. random_center uses a center
+# initial block instead (not part of the alignment).
 #   The selection horizon is the MAXIMUM OBSERVABLE BLOCK COUNT per block
 #   size, t_max = 196 / b^2 (196 = the 14x14 patch grid): every strategy is
 #   generated (and evaluated) up to full coverage, stopping naturally at its

@@ -1,9 +1,13 @@
 # Random block selection (lightweight rewrite of the original image loop).
 #
-# Selection rule (identical to the original per-image script):
-#   * INITIAL block: (left, top) sampled with random.choice twice
-#     (left first, then top) -> the RNG call order is the same as the
-#     original, so the output for a given --seed is identical.
+# Selection rule:
+#   * INITIAL block: (left, top) sampled with random.choice twice (left first,
+#     then top), drawn for ALL images up front with the same call order as the
+#     sigma-based / lookahead strategies, so for a given --seed the initial
+#     blocks are IDENTICAL across all random-initial strategies (the original
+#     per-image script drew the initial block for the next image only after
+#     consuming the RNG of the current image's candidate draws, so from the
+#     second image on its initial block differed from the other strategies).
 #   * Then, at each step, every (left, top) sliding window fully outside the
 #     observed region is a candidate; one is chosen uniformly with
 #     random.choice (candidates are built in le-major / to-minor order,
@@ -12,6 +16,11 @@
 #     image files are not even decoded here and the pretrained checkpoint is
 #     not loaded (the original loaded both, pointlessly: same outputs, much
 #     slower).
+#
+# NOTE: for a given --seed the selection sequence between images 2..N and the
+# one of the original script differ (the initial draws moved in front of the
+# image loop); random_center keeps the original behaviour (no random initial
+# block there, so nothing to align).
 #
 # Speed: the original recomputed every candidate window with einops inside
 # the per-image loop (~1.9 x 10^8 calls for 5000 images at b=1, ~2.4 h);
@@ -105,12 +114,18 @@ if __name__ == "__main__":
     selected_index_list = []
     n_saturated = 0
 
-    for n in tqdm(range(N)):
-
-        # initial block (same RNG call order as the original: left, then top)
+    # -- initial blocks are drawn for ALL images up front with the same
+    #    python-random stream and call order as the sigma/lookahead
+    #    strategies (left, then top per image), so for a given --seed the
+    #    initial blocks coincide with those strategies
+    anchor_rows = []
+    for n in range(N):
         left = random.choice(range(n_pos))
         top = random.choice(range(n_pos))
-        row = anchor_index[(left, top)]
+        anchor_rows.append(anchor_index[(left, top)])
+
+    for n in tqdm(range(N)):
+        row = anchor_rows[n]
         win = anchor_windows[row]
 
         context = list(win)

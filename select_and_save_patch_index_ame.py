@@ -9,11 +9,13 @@
 #
 # Method (official AttentionGlimpseSelector, adapted):
 #   * first block: uniformly random per image (default, seeded with --seed;
-#     the same "random initial block" convention as the other strategies).
-#     The official zero step of the reference code — the decoder runs once on
-#     mask tokens only (empty context) to produce an image-independent
-#     attention map, giving the same first block for every image — is
-#     available with --init zero;
+#     drawn with the same python-random stream and call order (left, then
+#     top) as the sigma-based / lookahead / random strategies, so for a given
+#     --seed the initial blocks are IDENTICAL across all random-initial
+#     strategies). The official zero step of the reference code — the decoder
+#     runs once on mask tokens only (empty context) to produce an
+#     image-independent attention map, giving the same first block for every
+#     image — is available with --init zero;
 #   * each step: run the MAE forward with the current context and take the
 #     softmax attention of one decoder block (default: last decoder layer);
 #     the attention rows (queries) of already-observed patches are zeroed and
@@ -30,11 +32,11 @@
 #
 # The attention maps are obtained through the officially supported
 # output_attentions=True path of the HF decoder (no model code is modified).
-# AME is deterministic, so no seed is needed (--random_first is off by
-# default, like the official code).
+# The attention-based selection itself is deterministic; --seed only drives
+# the random first block.
 #
 # Output: selected_patch_index/block_{b}_tmax_{T}_test_ame.json
-# (same naming rule as the other strategies; revision/run.sh uses T=32).
+# (same naming rule as the other strategies; run.sh passes T = 196/b^2).
 #
 # Usage:
 #   python select_and_save_patch_index_ame.py --fname configs/configs.yaml --b 3
@@ -44,6 +46,7 @@ import argparse
 import json
 import os
 import pprint
+import random
 
 import numpy as np
 import torch
@@ -141,7 +144,7 @@ def block_to_index(left, top, block_size, grid=GRID):
 
 
 def select_ame(model, xs_norm, b, device, attention_layer,
-               batch_size=64, init="random", rng=None):
+               batch_size=64, init="random"):
     """AME selection for block size b. Returns the flat observed patch lists
     per image (same JSON payload as the other selection strategies).
 
@@ -169,11 +172,18 @@ def select_ame(model, xs_norm, b, device, attention_layer,
         first = block_to_index(int(left), int(top), b)
         contexts = [list(first) for _ in range(N)]
     else:
-        # random initial block per image (same convention as the other
-        # strategies; anchors are the (GRID-b+1)^2 top-left corners)
-        anchors = rng.integers(0, GRID - b + 1, size=(N, 2))
+        # random initial block per image, drawn with the same python-random
+        # stream and call order (left, then top) as the sigma-based and
+        # lookahead strategies: for a given --seed the initial blocks are
+        # IDENTICAL across all random-initial strategies
+        anchors = []
+        for i in range(N):
+            left = random.choice(range(GRID - b + 1))
+            top = random.choice(range(GRID - b + 1))
+            anchors.append((left, top))
+        # NB: anchors rows are (left, top); block_to_index takes (left, top)
         contexts = [block_to_index(int(l_), int(t_), b)
-                    for t_, l_ in anchors]
+                    for l_, t_ in anchors]
     observed_sets = [set(c) for c in contexts]
     active = list(range(N))
     steps = [1] * N
@@ -271,7 +281,11 @@ if __name__ == "__main__":
     else:
         device = args.device
 
-    rng = np.random.default_rng(args.seed)
+    # the random first block uses the same python-random stream and call
+    # order (left, then top per image) as the other random-initial
+    # strategies, so the initial blocks coincide for a given --seed
+    random.seed(args.seed)
+    np.random.seed(args.seed)
 
     params = None
     with open(args.fname, 'r') as y_file:
@@ -327,7 +341,7 @@ if __name__ == "__main__":
 
     contexts, steps = select_ame(
         model, xs_norm, b, device, attention_layer,
-        batch_size=args.batch_size, init=args.init, rng=rng)
+        batch_size=args.batch_size, init=args.init)
     print(f"{VARIANT}: steps per image min={min(steps)}, max={max(steps)} "
           f"(cap={max_steps})")
 
