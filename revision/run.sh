@@ -24,7 +24,10 @@
 #                           sigma map (default --topk 16) and simulates only
 #                           the best 16 per image-step; random initial block
 #                           (seed = SEED). The most expensive selection
-#                           (~16x the sigma selection; b=1 dominates)
+#                           (~16x the sigma selection), so it runs for
+#                           b=2..4 only (skipped at b=1, where 196
+#                           candidates per image-step would roughly double
+#                           the total runtime for a modest gain)
 #
 #   The selection horizon is the MAXIMUM OBSERVABLE BLOCK COUNT per block
 #   size, t_max = 196 / b^2 (196 = the 14x14 patch grid): every strategy is
@@ -95,8 +98,9 @@ $PY calibration_eval.py --fname "$CFG" --b 4 --device "$DEVICE"
 for b in 1 2 3 4; do
 
     TMAX=$((N_PATCHES / b / b))   # 196/49/21/12 for b=1/2/3/4
+    if [ "$b" = 1 ]; then NSEL=8; else NSEL=9; fi   # + lookahead from b=2
     echo ""
-    echo "=== block size b=$b (t_max=$TMAX): generating 9 selection JSONs (7 + AME + lookahead) ==="
+    echo "=== block size b=$b (t_max=$TMAX): generating $NSEL selection JSONs (7 + AME + lookahead for b>=2) ==="
 
     $PY select_and_save_patch_index.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE" --preload --batch_size "$BATCH"
     $PY select_and_save_patch_index.py --fname "$CFG" --T "$TMAX" --b "$b" --start center --seed "$SEED" --device "$DEVICE" --preload --batch_size "$BATCH"
@@ -112,9 +116,12 @@ for b in 1 2 3 4; do
     # 1-step lookahead: pre-screens candidates with the current sigma map
     # (default --topk 16) and simulates only the 16 best anchors per
     # image-step; random initial block (--seed, i.e. default --start random).
-    # NOTE: the most expensive selection (~16x the sigma selection; the
-    # b=1 sweep dominates, expect several extra hours on top of the rest)
-    $PY select_and_save_patch_index_lookahead.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE" --preload --batch_size "$BATCH"
+    # NOTE: the most expensive selection (~16x the sigma selection), so it
+    # runs for b=2..4 only; the b=1 case (196 candidates per image-step)
+    # alone would add roughly half a day even on a GPU for a modest gain
+    if [ "$b" != 1 ]; then
+        $PY select_and_save_patch_index_lookahead.py --fname "$CFG" --T "$TMAX" --b "$b" --seed "$SEED" --device "$DEVICE" --preload --batch_size "$BATCH"
+    fi
 
     echo ""
     echo "=== block size b=$b: MAE reconstruction error vs t ================"
