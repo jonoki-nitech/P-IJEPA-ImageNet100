@@ -39,7 +39,16 @@
 #
 # Output:
 #   random start : selected_patch_index/block_{b}_tmax_{T}_test_lookahead.json
-#   center start : selected_patch_index/block_{b}_tmax_{T}_test_lookahead_start_center.json
+#                  + stats_block_..._test_lookahead.json: per-image trajectory
+#                  of the total sigma over the unobserved patches (one entry
+#                  per observed block, initial block included) + per decision
+#                  step the rank of the chosen anchor in the CURRENT
+#                  pooled-sigma ranking over all valid anchors (1 = the
+#                  sigma-greedy choice) and the number of valid anchors
+#   center start : ..._test_lookahead_start_center.json (+ its stats file,
+#                  same content)
+#   (the "stats_" prefix keeps the stats files invisible to the eval glob
+#    block_{b}_tmax_{T}_test*.json)
 #
 # Usage:
 #   python select_and_save_patch_index_lookahead.py \
@@ -226,6 +235,18 @@ if __name__ == "__main__":
     rows_ar = lambda R: torch.arange(R, device=device)[:, None]
     n_saturated = 0
 
+    # -- per-image stats (saved next to the selection JSON) -------------------
+    # sigma_sum_traj[i][j]: total sigma over the still-unobserved patches
+    #   given the first j+1 observed blocks (trajectory of the total
+    #   uncertainty; the value the strategy conditions on before each choice)
+    # chosen_rank[i][s]: at decision step s, the rank of the anchor actually
+    #   chosen in the current pooled-sigma ranking over ALL valid anchors
+    #   (1 = the sigma-greedy choice; the quantity --topk screens on)
+    # n_valid_traj[i][s]: number of valid anchors at decision step s
+    sigma_sum_traj = [[] for _ in range(N)]
+    chosen_rank = [[] for _ in range(N)]
+    n_valid_traj = [[] for _ in range(N)]
+
     for t in range(T):
         if not active:
             break
@@ -271,32 +292,40 @@ if __name__ == "__main__":
             for row, i in enumerate(imgs_ids):
                 feats[lo + row] = feature[row]
 
-        # -- optional --topk pre-screening: rank the valid anchors by the
-        #    CURRENT pooled sigma map (one extra sigma-predictor forward per
-        #    image) and simulate only the best --topk candidates per image
+        # -- current sigma map: used for the --topk pre-screening AND for the
+        #    stats (uncertainty trajectory + chosen-block rank); one
+        #    sigma-predictor forward per image
+        sig_rows = []
+        for lo in range(0, len(active), args.batch_size):
+            n_chunk = len(active[lo:lo + args.batch_size])
+            fc = torch.stack(feats[lo:lo + n_chunk])          # (Bc, k, D)
+            mask_ctx = torch.tensor(ctx_mat[lo:lo + n_chunk],
+                                    dtype=torch.long, device=device)
+            with torch.no_grad():
+                sig = sigma_head(sigma_predictor(
+                    fc, [mask_ctx],
+                    [full_idx.unsqueeze(0).repeat(n_chunk, 1)]))
+            if sig.dim() == 3:
+                sig = sig.squeeze(-1)
+            sig_rows.append(sig)
+        sigma_cur = torch.cat(sig_rows)                       # (A, 196)
+        # total uncertainty over the still-unobserved patches (trajectory
+        # point for the context the strategy is about to extend)
+        obs_t = torch.tensor(observed[active], dtype=torch.bool,
+                             device=device)
+        sig_sum = sigma_cur.masked_fill(obs_t, 0.0).sum(dim=1)
+        for ai, i in enumerate(active):
+            sigma_sum_traj[i].append(float(sig_sum[ai]))
+        pooled = F.avg_pool2d(sigma_cur.reshape(-1, 1, 14, 14),
+                              kernel_size=block_size,
+                              stride=1)                       # (A,1,Hp,Wp)
+        pooled = (pooled.reshape(len(active), n_pos, n_pos)
+                        .transpose(1, 2)
+                        .reshape(len(active), -1))            # le-major order
+        pool_np = pooled.detach().cpu().numpy()
+        valid_used = valid_all
         if args.topk > 0:
-            sig_rows = []
-            for lo in range(0, len(active), args.batch_size):
-                n_chunk = len(active[lo:lo + args.batch_size])
-                fc = torch.stack(feats[lo:lo + n_chunk])      # (Bc, k, D)
-                mask_ctx = torch.tensor(ctx_mat[lo:lo + n_chunk],
-                                        dtype=torch.long, device=device)
-                with torch.no_grad():
-                    sig = sigma_head(sigma_predictor(
-                        fc, [mask_ctx],
-                        [full_idx.unsqueeze(0).repeat(n_chunk, 1)]))
-                if sig.dim() == 3:
-                    sig = sig.squeeze(-1)
-                sig_rows.append(sig)
-            sigma_cur = torch.cat(sig_rows)                   # (A, 196)
-            pooled = F.avg_pool2d(sigma_cur.reshape(-1, 1, 14, 14),
-                                  kernel_size=block_size,
-                                  stride=1)              # (A,1,Hp,Wp)
-            pooled = (pooled.reshape(len(active), n_pos, n_pos)
-                            .transpose(1, 2)
-                            .reshape(len(active), -1))         # le-major order
-            pool_np = pooled.detach().cpu().numpy()
-            valid_all = [
+            valid_used = [
                 valid if len(valid) <= args.topk else
                 [valid[j] for j in np.argsort(
                     -pool_np[ai][valid], kind='stable')[:args.topk]]
@@ -305,7 +334,7 @@ if __name__ == "__main__":
         # -- simulate every candidate: mu-predict its features, then score
         #    the synthetic next context with the sigma predictor
         rep, cand, img_seg = [], [], []
-        for ai, valid in enumerate(valid_all):
+        for ai, valid in enumerate(valid_used):
             img_seg.append((len(rep), len(valid)))
             rep.extend([ai] * len(valid))
             cand.extend(valid)
@@ -355,12 +384,56 @@ if __name__ == "__main__":
             win = anchor_windows[best]
             contexts[i].extend(win)
             observed[i, win] = True
+            # rank of the chosen anchor in the current pooled-sigma ranking
+            # over ALL valid anchors (1 = the sigma-greedy choice); same
+            # ordering rule as the --topk pre-screening (stable argsort)
+            full_valid = valid_all[ai]
+            pos = full_valid.index(best)
+            order = np.argsort(-pool_np[ai][full_valid], kind='stable')
+            chosen_rank[i].append(int(np.flatnonzero(order == pos)[0]) + 1)
+            n_valid_traj[i].append(len(full_valid))
 
     print()
 
     if n_saturated > 0:
         print(f"end: {n_saturated}/{N} image(s) saturated "
               f"(no fully-unobserved b x b block left before t={T})")
+
+    # -- terminal uncertainty: one sigma forward per image with its FINAL
+    #    context (last point of the sigma-sum trajectory). Images saturate
+    #    at different block counts, so batch same-length contexts together.
+    order = sorted(range(N), key=lambda i: len(contexts[i]))
+    lo = 0
+    while lo < N:
+        j = lo
+        while j < N and len(contexts[order[j]]) == len(contexts[order[lo]]):
+            j += 1
+        same = order[lo:j]
+        lo = j
+        for lo2 in range(0, len(same), args.batch_size):
+            chunk = same[lo2:lo2 + args.batch_size]
+            if imgs is not None:
+                x = torch.stack([imgs[i] for i in chunk]).to(device)
+            else:
+                x = torch.stack(
+                    [test_dataset[i][0] for i in chunk]).to(device)
+            mask_ctx = torch.tensor([contexts[i] for i in chunk],
+                                    dtype=torch.long, device=device)
+            obs_c = torch.zeros(len(chunk), 196, dtype=torch.bool,
+                                device=device)
+            obs_c[torch.arange(len(chunk), device=device)[:, None],
+                  torch.tensor([contexts[i] for i in chunk],
+                               device=device)] = True
+            with torch.no_grad():
+                feature = encoder(x, [mask_ctx])
+                sig = sigma_head(sigma_predictor(
+                    feature, [mask_ctx],
+                    [full_idx.unsqueeze(0).repeat(len(chunk), 1)]))
+            if sig.dim() == 3:
+                sig = sig.squeeze(-1)
+            sig_sum = sig.masked_fill(obs_c, 0.0).sum(dim=1)
+            for row, i in enumerate(chunk):
+                sigma_sum_traj[i].append(float(sig_sum[row]))
 
     os.makedirs("selected_patch_index", exist_ok=True)
 
@@ -369,3 +442,25 @@ if __name__ == "__main__":
               f"block_{block_size}_tmax_{T}_test_lookahead{suffix}.json",
               "w") as f:
         json.dump(contexts, f)
+
+    # -- stats file ("stats_" prefix: never matched by the eval glob
+    #    block_{b}_tmax_{T}_test*.json, but picked up by the run.sh zip)
+    stats = {
+        "meta": {"strategy": "lookahead", "b": block_size, "T": T,
+                 "seed": args.seed, "start": args.start, "topk": args.topk,
+                 "N": N},
+        # sigma_sum[i]: len = #observed blocks; entry j = total sigma over
+        #   the unobserved patches given the first j+1 blocks
+        # chosen_sigma_rank[i]: len = #decision steps; rank (1-based) of the
+        #   chosen anchor among the valid anchors in the current pooled-sigma
+        #   ranking (stable argsort, same rule as --topk)
+        # n_valid_anchors[i]: len = #decision steps; #valid anchors at that
+        #   step (denominator for a relative rank)
+        "sigma_sum": sigma_sum_traj,
+        "chosen_sigma_rank": chosen_rank,
+        "n_valid_anchors": n_valid_traj,
+    }
+    with open(f"selected_patch_index/"
+              f"stats_block_{block_size}_tmax_{T}_test_lookahead{suffix}.json",
+              "w") as f:
+        json.dump(stats, f)

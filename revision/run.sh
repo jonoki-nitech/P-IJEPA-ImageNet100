@@ -4,10 +4,10 @@
 #
 #   Two experiments, end to end, for the hand-off run:
 #     Step 0: uncertainty (sigma) calibration           -> images/calibration/
-#     Steps 1-4: 8 selection strategies x block sizes b=1..4
+#     Steps 1-4: 9 selection strategies x block sizes b=1..4
 #               -> per-variant index JSONs + MAE reconstruction-error vs t
 #
-#   8 strategies generated per block size:
+#   9 strategies generated per block size:
 #     selected            : sigma-based selection, random initial block
 #     start_center        : sigma-based selection, center initial block
 #     random              : random selection, random initial block
@@ -19,6 +19,12 @@
 #                           Pardyl et al., IJCAI 2023) using the MAE decoder
 #                           attention; random initial block (seed = SEED);
 #                           runs to natural saturation (no T cap)
+#     lookahead           : 1-step lookahead selection (mu-predicted
+#                           rollout); pre-screens candidates with the current
+#                           sigma map (default --topk 16) and simulates only
+#                           the best 16 per image-step; random initial block
+#                           (seed = SEED). The most expensive selection
+#                           (~16x the sigma selection; b=1 dominates)
 #
 #   The selection horizon is the MAXIMUM OBSERVABLE BLOCK COUNT per block
 #   size, t_max = 196 / b^2 (196 = the 14x14 patch grid): every strategy is

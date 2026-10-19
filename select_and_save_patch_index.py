@@ -297,6 +297,12 @@ if __name__ == "__main__":
     block_offsets = (torch.arange(block_size, device=device)[:, None] * 14 +
                      torch.arange(block_size, device=device)[None, :]).reshape(-1)
 
+    # -- per-image stats: trajectory of the total sigma over the still-
+    #    unobserved patches; sigma_sum_traj[i][j] = the sum given the first
+    #    j+1 observed blocks (the value the strategy conditions on before
+    #    each choice, plus a terminal value after the last block)
+    sigma_sum_traj = [[] for _ in range(N)]
+
     for t in range(T):
         if not active:
             break
@@ -341,6 +347,13 @@ if __name__ == "__main__":
             # observed patches never win the argmax (same as the -inf write)
             sigma = sigma.masked_fill(obs[lo:lo + len(chunk)], -torch.inf)
 
+            # total sigma over the still-unobserved patches (trajectory point
+            # for the context the strategy is about to extend)
+            sig_sum = sigma.masked_fill(obs[lo:lo + len(chunk)],
+                                        0.0).sum(dim=1)
+            for row, i in enumerate(chunk):
+                sigma_sum_traj[i].append(float(sig_sum[row]))
+
             # pooled sigma map, argmax per image (the same computation as
             # select_next_block, vectorized over the batch
             pooled = F.avg_pool2d(sigma.reshape(len(chunk), 1, 14, 14),
@@ -358,6 +371,42 @@ if __name__ == "__main__":
 
     print()
 
+    # -- terminal uncertainty: one sigma forward per image with its FINAL
+    #    context (last point of the sigma-sum trajectory). Images saturate
+    #    at different block counts, so batch same-length contexts together.
+    order = sorted(range(N), key=lambda i: len(contexts[i]))
+    lo = 0
+    while lo < N:
+        j = lo
+        while j < N and len(contexts[order[j]]) == len(contexts[order[lo]]):
+            j += 1
+        same = order[lo:j]
+        lo = j
+        for lo2 in range(0, len(same), args.batch_size):
+            chunk = same[lo2:lo2 + args.batch_size]
+            if imgs is not None:
+                x = torch.stack([imgs[i] for i in chunk]).to(device)
+            else:
+                x = torch.stack(
+                    [test_dataset[i][0] for i in chunk]).to(device)
+            mask_ctx = torch.tensor([contexts[i] for i in chunk],
+                                    dtype=torch.long, device=device)
+            obs_c = torch.zeros(len(chunk), 196, dtype=torch.bool,
+                                device=device)
+            obs_c[torch.arange(len(chunk), device=device)[:, None],
+                  torch.tensor([contexts[i] for i in chunk],
+                               device=device)] = True
+            with torch.no_grad():
+                feature = encoder(x, [mask_ctx])
+                sig = sigma_head(sigma_predictor(
+                    feature, [mask_ctx],
+                    [full_idx.unsqueeze(0).repeat(len(chunk), 1)]))
+            if sig.dim() == 3:
+                sig = sig.squeeze(-1)
+            sig_sum = sig.masked_fill(obs_c, 0.0).sum(dim=1)
+            for row, i in enumerate(chunk):
+                sigma_sum_traj[i].append(float(sig_sum[row]))
+
     selected_index_list = contexts
 
     os.makedirs("selected_patch_index", exist_ok=True)
@@ -365,3 +414,17 @@ if __name__ == "__main__":
     suffix = "" if args.start == "random" else "_start_center"
     with open(f"selected_patch_index/block_{block_size}_tmax_{T}_test{suffix}.json", "w") as f:
         json.dump(selected_index_list, f)
+
+    # -- stats file ("stats_" prefix: never matched by the eval glob
+    #    block_{b}_tmax_{T}_test*.json, but picked up by the run.sh zip)
+    stats = {
+        "meta": {"strategy": "selected", "b": block_size, "T": T,
+                 "seed": args.seed, "start": args.start, "N": N},
+        # sigma_sum[i]: len = #observed blocks; entry j = total sigma over
+        #   the unobserved patches given the first j+1 blocks
+        "sigma_sum": sigma_sum_traj,
+    }
+    with open(f"selected_patch_index/"
+              f"stats_block_{block_size}_tmax_{T}_test{suffix}.json",
+              "w") as f:
+        json.dump(stats, f)
