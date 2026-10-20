@@ -14,6 +14,7 @@ results/
 images/
 selected_patch_index/
 result.zip
+result_seed_*.zip
 
 # --- 未使用・配布対象外スクリプト/文書(ファイルは実マシンに残す) ---
 README_ADD.md

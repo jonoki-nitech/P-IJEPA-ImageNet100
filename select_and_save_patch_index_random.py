@@ -64,6 +64,11 @@ parser.add_argument(
     '--seed', type=int, default=None,
     help='manual seed for the random selection sequence; if omitted, '
          'behavior is unchanged (non-deterministic)')
+parser.add_argument(
+    '--outdir', type=str, default='selected_patch_index',
+    help='output directory for the selection JSONs (default: '
+         'selected_patch_index; the per-seed runs of revision/run.sh write '
+         'to selected_patch_index/seed_<SEED>)')
 
 if __name__ == "__main__":
 
@@ -151,7 +156,8 @@ if __name__ == "__main__":
         print(f"end: {n_saturated}/{N} image(s) saturated "
               f"(no fully-unobserved b x b block left before t={T})")
 
-    os.makedirs("selected_patch_index", exist_ok=True)
+    os.makedirs(args.outdir, exist_ok=True)
 
-    with open(f"selected_patch_index/block_{block_size}_tmax_{T}_test_random.json", "w") as f:
+    with open(os.path.join(args.outdir,
+              f"block_{block_size}_tmax_{T}_test_random.json"), "w") as f:
         json.dump(selected_index_list, f)

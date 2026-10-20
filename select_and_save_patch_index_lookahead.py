@@ -116,6 +116,11 @@ parser.add_argument(
     '--preload', action='store_true',
     help='preload the normalized images into CPU RAM (~0.6 MB/image) once '
          'so the selection loop does not re-decode image files at every step')
+parser.add_argument(
+    '--outdir', type=str, default='selected_patch_index',
+    help='output directory for the selection/stats JSONs (default: '
+         'selected_patch_index; the per-seed runs of revision/run.sh write '
+         'to selected_patch_index/seed_<SEED>)')
 
 if __name__ == "__main__":
 
@@ -435,12 +440,12 @@ if __name__ == "__main__":
             for row, i in enumerate(chunk):
                 sigma_sum_traj[i].append(float(sig_sum[row]))
 
-    os.makedirs("selected_patch_index", exist_ok=True)
+    os.makedirs(args.outdir, exist_ok=True)
 
     suffix = "" if args.start == "random" else "_start_center"
-    with open(f"selected_patch_index/"
+    with open(os.path.join(args.outdir,
               f"block_{block_size}_tmax_{T}_test_lookahead{suffix}.json",
-              "w") as f:
+              ), "w") as f:
         json.dump(contexts, f)
 
     # -- stats file ("stats_" prefix: never matched by the eval glob
@@ -460,7 +465,7 @@ if __name__ == "__main__":
         "chosen_sigma_rank": chosen_rank,
         "n_valid_anchors": n_valid_traj,
     }
-    with open(f"selected_patch_index/"
+    with open(os.path.join(args.outdir,
               f"stats_block_{block_size}_tmax_{T}_test_lookahead{suffix}.json",
-              "w") as f:
+              ), "w") as f:
         json.dump(stats, f)

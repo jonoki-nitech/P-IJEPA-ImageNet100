@@ -271,6 +271,11 @@ parser.add_argument(
          "only, image-independent)")
 parser.add_argument(
     '--seed', type=int, default=0, help='seed for the random first block')
+parser.add_argument(
+    '--outdir', type=str, default='selected_patch_index',
+    help='output directory for the selection JSONs (default: '
+         'selected_patch_index; the per-seed runs of revision/run.sh write '
+         'to selected_patch_index/seed_<SEED>)')
 
 if __name__ == "__main__":
 
@@ -349,8 +354,8 @@ if __name__ == "__main__":
     for i, ctx in enumerate(contexts):
         assert len(set(ctx)) == len(ctx), f"duplicate patch in image {i}"
 
-    os.makedirs("selected_patch_index", exist_ok=True)
-    out_path = f"selected_patch_index/block_{b}_tmax_{args.T}_test_{VARIANT}.json"
+    os.makedirs(args.outdir, exist_ok=True)
+    out_path = os.path.join(args.outdir, f"block_{b}_tmax_{args.T}_test_{VARIANT}.json")
     with open(out_path, "w") as f:
         json.dump(contexts, f)
     print(f"saved: {out_path}")

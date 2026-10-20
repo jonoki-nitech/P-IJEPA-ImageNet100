@@ -151,10 +151,11 @@ def forward_with_mask_idx(model, img, mask_idx=None, target_idx=None):
     return logits, rec_patches
 
 
-def variant_json_path(variant, block_size, t_max):
+def variant_json_path(variant, block_size, t_max,
+                      index_dir="selected_patch_index"):
     if variant == "selected":
-        return f"selected_patch_index/block_{block_size}_tmax_{t_max}_test.json"
-    return f"selected_patch_index/block_{block_size}_tmax_{t_max}_test_{variant}.json"
+        return os.path.join(index_dir, f"block_{block_size}_tmax_{t_max}_test.json")
+    return os.path.join(index_dir, f"block_{block_size}_tmax_{t_max}_test_{variant}.json")
 
 
 def plot_results(results, t_list, out_dir, log_scale, title):
@@ -259,7 +260,7 @@ parser.add_argument(
 parser.add_argument(
     '--variants', type=str, nargs='*', default=None,
     help='variants to evaluate (default: every JSON matching '
-         'selected_patch_index/block_{b}_tmax_{T}_test*.json)')
+         '<index_dir>/block_{b}_tmax_{T}_test*.json)')
 parser.add_argument(
     '--log', action='store_true',
     help='use a log scale on the y axis')
@@ -269,6 +270,11 @@ parser.add_argument(
 parser.add_argument(
     '--out_dir', type=str, default='images/rec_images',
     help='output directory')
+parser.add_argument(
+    '--index_dir', type=str, default='selected_patch_index',
+    help='directory holding the selection index JSONs (default: '
+         'selected_patch_index; the per-seed runs of revision/run.sh use '
+         'selected_patch_index/seed_<SEED>)')
 parser.add_argument(
     '--points_pt', type=str, default='',
     help='path to an existing rec_error_vs_t.pt; if set, the script does '
@@ -306,7 +312,7 @@ if __name__ == "__main__":
         # read-only, no model needed)
         variant_max_t = {}
         for v in results:
-            p = variant_json_path(v, b_pt, tmax_pt)
+            p = variant_json_path(v, b_pt, tmax_pt, args.index_dir)
             if os.path.exists(p):
                 ml = json.load(open(p))
                 variant_max_t[v] = min(len(x) // (b_pt ** 2) for x in ml)
@@ -367,7 +373,7 @@ if __name__ == "__main__":
     # ---- variants (auto: every JSON present for this (b, T)) -------------
     if args.variants is None or len(args.variants) == 0:
         base = f"block_{args.b}_tmax_{args.T}_test"
-        found = sorted(glob.glob(f"selected_patch_index/{base}*.json"))
+        found = sorted(glob.glob(os.path.join(args.index_dir, base + "*.json")))
         variants = []
         for p in found:
             stem = os.path.basename(p)[:-5]
@@ -381,7 +387,7 @@ if __name__ == "__main__":
     # ---- JSON loading ----------------------------------------------------
     variant_json_lengths = {}
     for variant in variants:
-        path = variant_json_path(variant, args.b, args.T)
+        path = variant_json_path(variant, args.b, args.T, args.index_dir)
         if not os.path.exists(path):
             print(f"[skip] {variant}: {path} not found")
             continue

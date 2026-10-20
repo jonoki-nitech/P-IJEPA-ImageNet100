@@ -78,6 +78,11 @@ parser.add_argument(
          'initial condition across variants; default), "order" = no dedicated '
          'initial block, the sequence starts from the first block of the '
          'fixed order (e.g. the top-left corner for raster)')
+parser.add_argument(
+    '--outdir', type=str, default='selected_patch_index',
+    help='output directory for the selection JSONs (default: '
+         'selected_patch_index; the per-seed runs of revision/run.sh write '
+         'to selected_patch_index/seed_<SEED>)')
 
 if __name__ == "__main__":
 
@@ -163,14 +168,15 @@ if __name__ == "__main__":
     # identical sequence for every image
     selected_index_list = [list(context) for _ in range(N)]
 
-    os.makedirs("selected_patch_index", exist_ok=True)
+    os.makedirs(args.outdir, exist_ok=True)
 
     if args.init == 'center':
         suffix = f"test_fixed_{args.mode}"
     else:
         suffix = f"test_fixed_{args.mode}_no_center"
 
-    with open(f"selected_patch_index/block_{block_size}_tmax_{T}_{suffix}.json", "w") as f:
+    with open(os.path.join(args.outdir,
+              f"block_{block_size}_tmax_{T}_{suffix}.json"), "w") as f:
         json.dump(selected_index_list, f)
 
     print(f"mode={args.mode}, init={args.init}, "
