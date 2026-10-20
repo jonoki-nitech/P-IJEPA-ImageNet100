@@ -14,15 +14,13 @@ conda activate p-ijepa
 BATCH=64 DEVICE=cuda:0 bash revision/run.sh 2>&1 | tee run.log
 ```
 
+(seed=1〜4の結果を順に実行します．1seedあたり7〜14時間かかる見込みなので，全体で4倍の時間がかかります．)
+
 (`BATCH`でバッチサイズを変更可能です．デフォルトは64ですが，メモリが足りない場合はお手数ですが減らして実行をお願いいたします．)
 
-## 複数seedでの繰り返し実行
+(seedを1つだけ指定して単発で実行したい場合は `SEED=<s> bash revision/run_seed.sh` を使ってください．デフォルトはSEED=0で，実行済みのseed 0の成果物と同じ場所・名前で出力します．)
 
-run.shを異なるシードで実行するためのスクリプトです（seed=1~4で実行するので，run.shの4倍の時間がかかる見込みです）．
-
-```bash
-BATCH=64 DEVICE=cuda:0 bash revision/run_seeds.sh 2>&1 | tee seeds_run.log &
-```
+## seedごとの成果物
 
 結果は以下のように，seedごとにresult*seed*{SEED}.zipにまとめられるため，こちらを共有いただきたいです．
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# revision/run_seeds.sh
+# revision/run.sh
 #
-#   Repeat the full sweep (revision/run.sh) over several seeds, one after
-#   another. Seed 0 is the original single-seed run (bash revision/run.sh);
-#   this script runs the given seed list on top of it:
+#   Repeat the full single-seed sweep (revision/run_seed.sh; default SEED=0)
+#   over several seeds, one after another. This is the intended one-command
+#   entry point for the receiver-side multi-seed experiment.
 #
 #     selection JSONs : selected_patch_index/seed_<SEED>/block_*.json
 #     stats files     : selected_patch_index/seed_<SEED>/stats_block_*.json
@@ -18,13 +18,12 @@
 #   at each run, identically for every seed.
 #
 #   NOTE: sequential by construction (~7-14 h per seed on the reference GPU);
-#   on the receiving machine run this under nohup / tmux so it survives
-#   disconnections, e.g.
-#       nohup bash revision/run_seeds.sh > seeds_run.log 2>&1 &
+#   run it under nohup / tmux so it survives disconnections, e.g.
+#       nohup bash revision/run.sh > run.log 2>&1 &
 #
 # Usage:
-#   PYTHON=/path/to/python bash revision/run_seeds.sh
-#   BATCH=<n> DEVICE=cuda:0 CONFIG=<yaml>   optional, forwarded to run.sh
+#   PYTHON=/path/to/python bash revision/run.sh
+#   BATCH=<n> DEVICE=cuda:0 CONFIG=<yaml>   optional, forwarded to run_seed.sh
 #   SEEDS="1 2"      override the default seed list ("1 2 3 4")
 # =============================================================================
 
@@ -36,16 +35,16 @@ SEEDS=${SEEDS:-"1 2 3 4"}
 for SEED in $SEEDS; do
     echo ""
     echo "#################################################################"
-    echo "###  revision/run.sh with SEED=$SEED"
+    echo "###  revision/run_seed.sh with SEED=$SEED"
     echo "#################################################################"
     SEED="$SEED" \
     PYTHON="${PYTHON:-python}" \
     BATCH="${BATCH:-64}" \
     DEVICE="${DEVICE:-cuda:0}" \
     CONFIG="${CONFIG:-configs/configs.yaml}" \
-    bash revision/run.sh
+    bash revision/run_seed.sh
 done
 
 echo ""
-echo "=== run_seeds.sh: done ($SEEDS) ==================================="
+echo "=== run.sh: done ($SEEDS) ========================================="
 ls -d selected_patch_index/seed_* 2>/dev/null || echo "(no seed subdirectories)"

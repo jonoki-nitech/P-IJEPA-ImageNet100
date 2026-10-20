@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# revision/run.sh
+# revision/run_seed.sh   (= the original revision/run.sh; renamed when the
+#                         multi-seed wrapper took the "run.sh" name)
 #
 #   Two experiments, end to end, for the hand-off run:
 #     Step 0: uncertainty (sigma) calibration           -> images/calibration/
@@ -49,7 +50,7 @@
 #   T=10 results in images/rec_images/b{b}/ are left untouched.
 #
 # Usage:
-#   PYTHON=/path/to/python bash revision/run.sh
+#   PYTHON=/path/to/python bash revision/run_seed.sh
 #   (PY defaults to "python". Scripts auto-fall back to CPU when CUDA is
 #    unavailable, so no device flag is needed.)
 #   BATCH=<n>   forwards n images together per step (default 64); set a
@@ -71,7 +72,7 @@
 #               result_seed_<s>.zip (override with ZIP=<name>); the seed is
 #               also recorded in the "meta" of the stats files.
 #               To repeat the sweep over several seeds in one go, use
-#               revision/run_seeds.sh (seeds 1..4 by default).
+#               revision/run.sh (seeds 1..4 by default).
 #
 #   Requires: torch, torchvision, numpy, matplotlib, pyyaml,
 #             transformers==4.47.1, einops, tqdm, Pillow.
