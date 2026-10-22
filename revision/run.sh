@@ -2,94 +2,127 @@
 # =============================================================================
 # revision/run.sh
 #
-#   Repeat the full single-seed sweep (revision/run_seed.sh; default SEED=0)
-#   over several seeds, one after another. This is the intended one-command
-#   entry point for the receiver-side multi-seed experiment.
+#   Train the DETERMINISTIC I-JEPA dropout baseline (main_det.py) on the
+#   GPU machine, in one command. This is the production entry point for the
+#   DET experiment.
 #
-#     selection JSONs : selected_patch_index/seed_<SEED>/block_*.json
-#     stats files     : selected_patch_index/seed_<SEED>/stats_block_*.json
-#     MAE error curves: images/rec_images_full/seed_<SEED>/b<b>/
-#     package         : result_seed_<SEED>.zip
+#   What it runs:
+#     python main_det.py --fname configs/configs_det.yaml --devices cuda:0
+#   (= the same I-JEPA setup as the probabilistic training, but
+#    deterministic: the mu-predictor is the predictor, the loss is plain
+#    MSE, the sigma modules are checkpointed but never trained, and the
+#    mu-predictor carries Dropout(p=0.1) (after the attention projection and
+#    in the MLPs of every block) for later MC-Dropout inference.
+#    See src/train_det.py for the full design.)
 #
-#   Seed 0 artefacts (selected_patch_index/, images/rec_images_full/b<b>/,
-#   result.zip and images/calibration/) stay exactly where they are: the
-#   per-seed runs neither read nor overwrite them. images/calibration is
-#   seed-independent (sigma-predictor calibration) and is simply re-produced
-#   at each run, identically for every seed.
+#   Outputs (do not collide with the probabilistic checkpoint):
+#     checkpoint : results/vitb16.224-bs.2048-ep.300-det/jepa-det-latest.pth.tar
+#                  (+ jepa-det-ep{50,100,...}.pth.tar every 50 epochs)
+#     CSV log    : results/vitb16.224-bs.2048-ep.300-det/jepa-det_r0.csv
+#     params copy: results/vitb16.224-bs.2048-ep.300-det/params-ijepa.yaml
+#     STL10 mon. : results/vitb16.224-bs.2048-ep.300-det/stl10_acc_monitoring.csv
+#                  (every 10 epochs; same cadence/code as the probabilistic
+#                  training. The default STL10 root is the GPU-machine path
+#                  hardcoded in stl10_eval.py; override with STL10_ROOT.)
+#     package    : result.zip — the DET artefacts for sharing, created at
+#                  the end automatically: the latest checkpoint + the log
+#                  files (CSV / params yaml / STL10 monitoring). The epoch
+#                  snapshots (jepa-det-ep*.pth.tar) are NOT included.
 #
-#   Once ALL seeds have finished, the per-seed artefacts are additionally
-#   consolidated into a single result.zip (per-seed subdirectories preserved,
-#   directory layout identical to the repo; the seed 0 products and the
-#   seed zips themselves are NOT included). result.zip is therefore the
-#   one file to share for the whole multi-seed experiment. Contents can be
-#   previewed without full extraction:
-#       python -c "import zipfile; print(zipfile.ZipFile('result.zip').namelist())"
-#   NOTE: an existing result.zip is OVERWRITTEN at this step (it no longer
-#   means the seed 0 package once the multi-seed run has completed; the
-#   seed 0 zip, if still needed, can be re-created with
-#   bash revision/run_seed.sh), and each per-seed result_seed_<SEED>.zip
-#   is kept as well.
-#   SKIP_ZIP=1 skips both the per-seed packaging and the final consolidation.
+#   Memory note: the DET run is strictly CHEAPER in VRAM than the
+#   probabilistic one (the sigma branch is never forwarded), so
+#   batch_size=64 that the probabilistic run fits is safe here. The exact
+#   peak VRAM appears in the log's first "[1, 0] ... [mem: ...]" line.
 #
-#   NOTE: sequential by construction (~7-14 h per seed on the reference GPU);
-#   run it under nohup / tmux so it survives disconnections, e.g.
-#       nohup bash revision/run.sh > run.log 2>&1 &
+# Usage (activate the env first, e.g. `conda activate p-ijepa`; NOTE: the
+#   script and the paths it references are repo-root relative, so RUN IT
+#   FROM THE REPOSITORY ROOT):
+#   bash revision/run.sh 2>&1 | tee run_train_dropout.log
+#   (600 epochs = the same runtime scale as the probabilistic training;
+#    run under nohup / tmux so it survives disconnections, e.g.
+#     nohup bash revision/run.sh > run_train_dropout.log 2>&1 &)
 #
-# Usage:
-#   PYTHON=/path/to/python bash revision/run.sh
-#   BATCH=<n> DEVICE=cuda:0 CONFIG=<yaml>   optional, forwarded to run_seed.sh
-#   SEEDS="1 2"      override the default seed list ("1 2 3 4")
+#   Optional 1st argument = config selection:
+#     bash revision/run.sh            -> configs/configs_det.yaml
+#                                        (batch 64  x backward/step 32)
+#     bash revision/run.sh bs64       -> same as no argument
+#     bash revision/run.sh bs32       -> configs/configs_det_bs32.yaml
+#                                        (batch 32 x backward/step 64;
+#                                        low-VRAM fallback when the default
+#                                        does not fit — halved activation
+#                                        memory, same effective 2048-image
+#                                        optimizer step)
+#     bash revision/run.sh <path>.yaml -> any custom config
+#    (a CONFIG=<yaml> env override also works; the argument wins)
+#
+#   Optional env overrides:
+#     PYTHON=<path>          default "python"
+#     DEVICES="cuda:0 ..."   default "cuda:0" (multi-GPU: extra words)
+#     CONFIG=<yaml>          default configs/configs_det.yaml (the 1st
+#                            argument above takes precedence)
+#     STL10_ROOT=<dir>       dir containing stl10_binary/ (default: the
+#                            GPU-machine path inside stl10_eval.py)
+#     ZIP=<name>             default "result.zip" (name of the final package)
+#     SKIP_ZIP=1             skip the final result.zip packaging
+#     DET_DIR=<dir>          override the DET logging folder (otherwise
+#                            auto-detected from CONFIG's logging.folder)
 # =============================================================================
 
 set -e
-set -u
 
-SEEDS=${SEEDS:-"1 2 3 4"}
+PYTHON=${PYTHON:-python}
+DEVICES=${DEVICES:-"cuda:0"}
+CONFIG=${CONFIG:-configs/configs_det.yaml}
 
-for SEED in $SEEDS; do
-    echo ""
-    echo "#################################################################"
-    echo "###  revision/run_seed.sh with SEED=$SEED"
-    echo "#################################################################"
-    SEED="$SEED" \
-    PYTHON="${PYTHON:-python}" \
-    BATCH="${BATCH:-64}" \
-    DEVICE="${DEVICE:-cuda:0}" \
-    CONFIG="${CONFIG:-configs/configs.yaml}" \
-    bash revision/run_seed.sh
-done
+# -- config selection: optional 1st argument (bs32 / bs64 / a .yaml path);
+#    CONFIG env still works but the argument takes precedence
+case "${1:-}" in
+    "" | bs64) : ;;
+    bs32) CONFIG=configs/configs_det_bs32.yaml ;;
+    *.yaml | *.yml) CONFIG="$1" ;;
+    *) echo "unknown config argument '$1' (use bs32, bs64, or a .yaml path)" >&2
+       exit 1 ;;
+esac
+
+echo "python : $($PYTHON --version 2>&1)"
+echo "config : $CONFIG   devices: $DEVICES"
+
+$PYTHON main_det.py --fname "$CONFIG" --devices $DEVICES
+
+echo ""
+echo "=== revision/run.sh (DET training): done ==========================="
+ls -l results/vitb16.224-bs.2048-ep.300-det/*.pth.tar 2>/dev/null || echo "(no checkpoint found)"
 
 # -----------------------------------------------------------------------------
-# Consolidate: once every seed finished, pack the per-seed artefacts into a
-#   single result.zip (per-seed directory layout preserved; seed 0 excluded,
-#   per-seed zips kept as before). Skipped with SKIP_ZIP=1.
+# Package: pack the DET artefacts into result.zip for sharing — the latest
+#   checkpoint + the log files (CSV / params yaml / STL10 monitoring); the
+#   epoch snapshots (jepa-det-ep*.pth.tar) stay out of the zip. Skipped with
+#   SKIP_ZIP=1. An existing result.zip is overwritten.
 # -----------------------------------------------------------------------------
 if [ "${SKIP_ZIP:-0}" != "1" ]; then
-    ZIP=${COMBINED_ZIP:-result.zip}
+    ZIP=${ZIP:-result.zip}
+    DET_DIR=${DET_DIR:-$("$PYTHON" -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['logging']['folder'])" "$CONFIG")}
+
     echo ""
-    echo "=== Consolidate per-seed artefacts into $ZIP ===================="
+    echo "=== Package DET artefacts into $ZIP ============================"
     rm -f "$ZIP"
-    SEEDS_LIST="$SEEDS" "$PY" - "$ZIP" <<'PYEOF'
-import os, sys, zipfile
-zip_name = sys.argv[1]
-seeds = [s.strip() for s in os.environ.get("SEEDS_LIST", "1 2 3 4").split()
-         if s.strip() and s.strip() != "0"]
-roots = ["images/calibration"]
-for s in seeds:
-    roots.append(f"selected_patch_index/seed_{s}")
-    roots.append(f"images/rec_images_full/seed_{s}")
+    "$PYTHON" - "$DET_DIR" "$ZIP" <<'PYEOF'
+import glob, os, sys, zipfile
+folder = sys.argv[1].rstrip("/")
+zip_name = sys.argv[2]
+patterns = ["*-latest.pth.tar", "*_r*.csv", "params-*.yaml", "stl10_acc_monitoring.csv"]
+files = []
+for pat in patterns:
+    files.extend(sorted(glob.glob(os.path.join(folder, pat))))
+if not files:
+    raise SystemExit(f"no artefacts found in {folder} (zip not created)")
 with zipfile.ZipFile(zip_name, "w", zipfile.ZIP_DEFLATED) as zf:
-    for root in roots:
-        if not os.path.isdir(root):
-            print(f"(missing: {root} — skipped)")
-            continue
-        for dirpath, _, files in os.walk(root):
-            for f in files:
-                zf.write(os.path.join(dirpath, f))
+    for f in files:
+        # .pth.tar is already-compressed binary: deflate gains nothing but
+        # costs minutes, so store it uncompressed (logs stay deflated)
+        ct = zipfile.ZIP_STORED if f.endswith(".pth.tar") else zipfile.ZIP_DEFLATED
+        zf.write(f, compress_type=ct)  # repo-root relative layout preserved
+        print("added:", f)
 print(f"created: {zip_name} ({os.path.getsize(zip_name) / 1e6:.1f} MB)")
 PYEOF
 fi
-
-echo ""
-echo "=== run.sh: done ($SEEDS) ========================================="
-ls -d selected_patch_index/seed_* 2>/dev/null || echo "(no seed subdirectories)"

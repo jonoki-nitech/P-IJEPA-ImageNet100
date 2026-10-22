@@ -11,18 +11,24 @@
 
 ```bash
 conda activate p-ijepa
-BATCH=64 DEVICE=cuda:0 bash revision/run.sh 2>&1 | tee run.log
+bash revision/run.sh 2>&1 | tee run.log
 ```
 
-(`BATCH`でバッチサイズを変更可能です．デフォルトは64ですが，メモリが足りない場合はお手数ですが減らして実行をお願いいたします．)
+メモリに乗らない場合は，以下のコマンドで実行をお願いします．
+
+```bash
+bash revision/run.sh bs32 2>&1 | tee run.log
+```
 
 ## 成果物
 
-結果は以下のように，seedごとにresult*seed*{SEED}.zipにまとめられます．さらに全seed完了後，seedごとの成果物を1つに統合した`result.zip`が自動生成されます．**最終的に共有いただきたいのはこの`result.zip`です**（seedごとのzipはそのまま残ります）．
+以下はすべて `results/vitb16.224-bs.2048-ep.300-det/`(DET訓練用logging folder)に保存されます．
 
-| seedごとの成果物                              | 保存先                                                               |
-| --------------------------------------------- | -------------------------------------------------------------------- |
-| 選択系列JSON + statsファイル                  | `selected_patch_index/seed_{SEED}/block_{1..4}_tmax_{196/b²}_*.json` |
-| MAE再構成誤差 vs t(グラフPNG / CSV / 生値pt)  | `images/rec_images_full/seed_{SEED}/b{1..4}/`                        |
-| 上記成果物をまとめたzip(実行終了時に自動生成) | `result_seed_{SEED}.zip`(リポジトリ直下)                             |
-| 全seedを統合したzip(全seed完了後に自動生成)   | `result.zip`(リポジトリ直下)                                         |
+| 成果物                                                                                       | 保存先                            |
+| -------------------------------------------------------------------------------------------- | --------------------------------- |
+| checkpoint(latest; 再開・MC Dropout評価用)                                                   | `jepa-det-latest.pth.tar`         |
+| エポック別checkpoint(50epoch毎に自動保存)                                                    | `jepa-det-ep{50,100,...}.pth.tar` |
+| 訓練lossログ(epoch/itr/loss/masks/時間)                                                      | `jepa-det_r0.csv`                 |
+| 実行時設定のコピー                                                                           | `params-ijepa.yaml`               |
+| STL10線形分類精度のモニタ(10epoch毎)                                                         | `stl10_acc_monitoring.csv`        |
+| 上記の最新checkpoint+ログをまとめたzip(訓練終了後に自動生成; エポック別checkpointは含まない) | `result.zip`(リポジトリ直下)      |
