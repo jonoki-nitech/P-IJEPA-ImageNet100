@@ -22,5 +22,4 @@ README_old.md
 eval_cifar100.py
 eval_in100.py
 eval_stl10.py
-stl10_eval.py
 run_selection_mae_pipeline.sh
