@@ -2,7 +2,7 @@
 
 ## 事前準備
 
-- 前回の実験で生成された学習済みモデル `jepa-det-latest.pth.tar` を `results/det-pretrained/` に置いていただきたいです。
+- 前回の実験で生成された学習済みモデル `results/vitb16.224-bs.2048-ep.300-det/jepa-det-latest.pth.tar` を `results/det-pretrained/` に置いていただきたいです。
 - 仮想環境：p-ijepa
 
 ## 実行
