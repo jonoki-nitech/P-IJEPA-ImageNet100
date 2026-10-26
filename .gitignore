@@ -16,7 +16,6 @@ selected_patch_index/
 selected_patch_index_mcdropout/
 result.zip
 result_seed_*.zip
-result_det.zip
 result_det_seed_*.zip
 
 # --- 未使用・配布対象外スクリプト/文書(ファイルは実マシンに残す) ---

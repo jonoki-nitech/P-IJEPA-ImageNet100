@@ -40,7 +40,7 @@
 #           stats + eval results + the calibration artefacts, mirroring the
 #           sigma experiment's result_seed_<s>.zip contents)
 #
-#   End: consolidate every seed into result_det.zip (directory layout
+#   End: consolidate every seed into result.zip (directory layout
 #        preserved; per-seed zips kept). SKIP_ZIP=1 skips both packagings.
 #
 #   Comparability notes:
@@ -84,7 +84,7 @@
 #     SEL_ROOT=<dir>       default selected_patch_index_mcdropout
 #     EVAL_ROOT=<dir>      default images/rec_images_mcdropout
 #     SKIP_ZIP=1           skip the per-seed and consolidated packaging
-#     COMBINED_ZIP=<name>  default "result_det.zip"
+#     COMBINED_ZIP=<name>  default "result.zip"
 # =============================================================================
 
 set -e
@@ -182,7 +182,7 @@ echo "=== revision/run.sh: experiments done (seeds: $SEEDS) ============="
 # -----------------------------------------------------------------------------
 # Packaging: per-seed zip (selection JSONs + stats + MAE-eval results + the
 # calibration artefacts; same content policy as the sigma experiment's
-# result_seed_<s>.zip), then the consolidated result_det.zip. Skipped with
+# result_seed_<s>.zip), then the consolidated result.zip. Skipped with
 # SKIP_ZIP=1. Existing zips are overwritten.
 # -----------------------------------------------------------------------------
 if [ "${SKIP_ZIP:-0}" != "1" ]; then
@@ -210,7 +210,7 @@ print(f"created: {zip_name} ({os.path.getsize(zip_name) / 1e6:.1f} MB)")
 PYEOF
     done
 
-    ZIP=${COMBINED_ZIP:-result_det.zip}
+    ZIP=${COMBINED_ZIP:-result.zip}
     echo ""
     echo "=== consolidate all per-seed artefacts into $ZIP ==========="
     rm -f "$ZIP"
