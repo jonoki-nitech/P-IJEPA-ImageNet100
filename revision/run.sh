@@ -28,16 +28,27 @@
 #       own predictions (mu mean + current sigma), never true features
 #
 #   Evaluation:
-#     * after every selection, test_mae_vs_t.py evaluates ONLY the new
-#       variant (--variants lookahead_sample): each seed's rec_error_vs_t.csv
-#       contains just "lookahead_sample" (fast; the existing sigma
+#     * after every (seed, b), test_mae_vs_t.py evaluates ONLY this
+#       experiment's variants (--variants lookahead_sample[<K>]): each
+#       seed's rec_error_vs_t.csv keeps one row per K (fast; the sigma
 #       variants were already evaluated individually - cross-strategy
 #       comparison plots are assembled post-hoc, e.g. from the saved
 #       selection JSONs or the earlier per-variant CSVs)
 #
+#   Output directories (fully SEPARATE from the sigma/MC experiments):
+#     selection JSONs + stats -> selected_patch_index_lookahead_sample/
+#                                (seed 0 at the root; other seeds in
+#                                seed_<s>/ subdirectories)
+#     MAE evaluation          -> images/rec_image_lookahead_sample/...
+#
+#   Packaging: after every seed finishes, everything (selection + eval,
+#   all seeds, directory layout preserved) is consolidated into a single
+#   result.zip (SKIP_ZIP=1 to skip; COMBINED_ZIP=<name> to rename; no
+#   per-seed zips)
+#
 #   Cost: per step ≈ (σ lookahead cost) + SAMPLES extra sigma-predictor
-#   forwards per candidate row-chunk. For smoke tests use MAX_T=2,
-#   SAMPLES=1, SKIP-heavy defaults below; no zip packaging in this script.
+#   forwards per candidate row-chunk. For smoke tests use MAX_T=2
+#   (artefacts then never collide with full-run ones).
 #
 # Usage (activate the env first, e.g. `conda activate p-ijepa`; RUN IT FROM
 # THE REPOSITORY ROOT):
@@ -60,8 +71,10 @@
 #     MAX_T=<n>            cap the selection horizon for smoke tests
 #                          (the actual tmax is in the JSON names, so smoke
 #                          artefacts never collide with full-run ones)
-#     SEL_ROOT=<dir>       default selected_patch_index
-#     EVAL_ROOT=<dir>      default images/rec_images_full
+#     SEL_ROOT=<dir>       default selected_patch_index_lookahead_sample
+#     EVAL_ROOT=<dir>      default images/rec_image_lookahead_sample
+#     SKIP_ZIP=1           skip the consolidated result.zip packaging
+#     COMBINED_ZIP=<name>  default "result.zip"
 # =============================================================================
 
 set -e
@@ -74,15 +87,15 @@ BATCH=${BATCH:-64}
 SEEDS=${SEEDS:-"0 1 2 3 4"}
 SAMPLES=${SAMPLES:-"1 4"}
 TOPK=${TOPK:-16}
-SEL_ROOT=${SEL_ROOT:-selected_patch_index}
-EVAL_ROOT=${EVAL_ROOT:-images/rec_images_full}
+SEL_ROOT=${SEL_ROOT:-selected_patch_index_lookahead_sample}
+EVAL_ROOT=${EVAL_ROOT:-images/rec_image_lookahead_sample}
 
 echo "python : $($PY --version 2>&1)"
 echo "samples=[$SAMPLES]  topk=$TOPK  seeds=[$SEEDS]  device=$DEVICE  batch=$BATCH  config=$CONFIG"
 
 # -----------------------------------------------------------------------
 # Per seed: sampled-rollout lookahead selection (b = 2..4, random start)
-# + MAE reconstruction-error-vs-t evaluation of all variants in the dir
+# + MAE reconstruction-error-vs-t evaluation of this experiment's variants
 # -----------------------------------------------------------------------
 for SEED in $SEEDS; do
     echo ""
@@ -141,3 +154,35 @@ done
 echo ""
 echo "=== revision/run.sh: sampled-rollout lookahead done (seeds: $SEEDS) =="
 ls -d "$SEL_ROOT"* 2>/dev/null || echo "(no selection artefacts)"
+
+# ---------------------------------------------------------------------------
+# Packaging: consolidate every artefact (selection JSONs + stats + MAE-eval
+# results; all seeds, directory layout preserved) into ONE result.zip.
+# Skipped with SKIP_ZIP=1; renamed with COMBINED_ZIP=<name>. Overwritten.
+# ---------------------------------------------------------------------------
+if [ "${SKIP_ZIP:-0}" != "1" ]; then
+    ZIP=${COMBINED_ZIP:-result.zip}
+    echo ""
+    echo "=== consolidate all artefacts into $ZIP ==========="
+    rm -f "$ZIP"
+    "$PY" - "$ZIP" "$SEEDS" "$SEL_ROOT" "$EVAL_ROOT" <<'PYEOF'
+import os, sys, zipfile
+zip_name, seeds_str, sel_root, eval_root = sys.argv[1:5]
+seeds = [s for s in seeds_str.split() if s]
+roots = []
+for s in seeds:
+    if s == "0":
+        roots += [sel_root, eval_root]      # seed 0 = repo-root directories
+    else:
+        roots += [f"{sel_root}/seed_{s}", f"{eval_root}/seed_{s}"]
+with zipfile.ZipFile(zip_name, "w", zipfile.ZIP_DEFLATED) as zf:
+    for root in roots:
+        if not os.path.isdir(root):
+            print(f"(missing: {root}  -- skipped)")
+            continue
+        for dirpath, _, files in os.walk(root):
+            for f in files:
+                zf.write(os.path.join(dirpath, f))
+print(f"created: {zip_name} ({os.path.getsize(zip_name) / 1e6:.1f} MB)")
+PYEOF
+fi
