@@ -11,7 +11,11 @@
 #     model's predictive distribution for the candidate patches
 #         feature_c ~ N(mu, sigma^2)
 #         mu      = predictor(observed, ctx, c)          (R, b^2, D)
-#         sigma   = current sigma map at the candidate patches (R, b^2)
+#         sigma^2 = current sigma map at the candidate patches (R, b^2)
+#                       (the sigma head outputs the VARIANCE: the train
+#                        loss e/v + log v matches a Gaussian NLL with
+#                        variance = output, so the sampling std is the
+#                        square root of the map value)
 #         eps     ~ N(0, I) of shape (R, b^2, D)
 #         feature_c = mu + sigma * eps
 #     and the synthetic next context [observed, feature_c] is scored with
@@ -365,11 +369,14 @@ if __name__ == "__main__":
                     [torch.tensor(ctx_mat[rr], dtype=torch.long,
                                   device=device)],
                     [cand_idx])                           # (R, b^2, D)
-                # sampling std at the candidate patches: the CURRENT sigma
-                # map of each row's image (available before the choice)
+                # sampling std at the candidate patches: sqrt of the CURRENT
+                # sigma-map values of each row's image. The sigma head
+                # outputs the VARIANCE (the train loss e/v + log v matches a
+                # Gaussian NLL with variance = output), so the sampling
+                # amplitude is the square root, not the raw value
                 std_c = (sigma_cur[torch.tensor(rr, device=device)]
                          .gather(1, cand_idx)
-                         .clamp_min(0.0).unsqueeze(-1))   # (R, b^2, 1)
+                         .clamp_min(0.0).sqrt().unsqueeze(-1))   # (R, b^2, 1)
                 ctxC = torch.cat(
                     [torch.tensor(ctx_mat[rr], dtype=torch.long,
                                   device=device),
