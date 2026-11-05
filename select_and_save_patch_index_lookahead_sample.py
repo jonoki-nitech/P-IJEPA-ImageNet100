@@ -1,5 +1,5 @@
-# 1-step-lookahead selection with a SAMPLED rollout ("lookahead_sample"
-# strategy).
+# 1-step / H-step lookahead selection with a SAMPLED rollout
+# ("lookahead_sample" strategy).
 #
 # Identical to the "lookahead" strategy (select_and_save_patch_index_
 # lookahead.py) except for the simulation of the candidate block:
@@ -24,8 +24,24 @@
 #                                                 all_196))
 #         score(c) = sum of sigma_next over the patches NOT in (ctx U c)
 #
-# With --samples K > 1 the score of a candidate is the MEAN of the K
-# sampled rollouts (K=1, the default, is the pure sampling variant).
+# With --horizon H > 1 the rollout is a H-step CASCADE: after the
+# candidate's features enter the synthetic context, every FURTHER
+# simulated level greedily picks the next block from the model's own
+# simulated sigma map (largest pooled sigma over the still-valid anchors),
+# samples its features the same way (mu + sqrt(sigma) * eps), appends them
+# and re-computes the simulated map. The score is the total remaining
+# sigma after the whole chain, so the choice of the REAL block is the
+# heuristic on "where does a greedy H-step rollout starting at c end up".
+# Each of the --samples K rollouts is an independent chain (the inner
+# block choices may differ between chains); K=1 is the pure variant.
+# If a row runs out of valid anchors mid-chain (near-saturation image),
+# its chain simply stops early and is scored with the map built so far.
+# Anti-peeking still holds: only predicted/sampled features and the
+# model's own maps enter the simulation, true features are never read.
+# Naming: horizon=1 keeps the plain names (lookahead_sample /
+# lookahead_sample<K>); horizon>1 appends h<H>
+# (e.g. lookahead_sampleh2 for K=1, H=2).
+#
 # The score is therefore an estimate built only from information available
 # at the current step (observed encoder features + the model's own
 # predictions); the true encoder features of the candidates are never
@@ -42,10 +58,10 @@
 # sigma predictor saw in training (it was trained with the predicted mean
 # as context), which is exactly the hypothesis this experiment tests.
 #
-# Speed: same cost as the mu lookahead plus K extra sigma-predictor
-# forwards per candidate row-chunk (mu prediction is computed once and
-# reused across the K samples). --topk 16 pre-screening as in lookahead.
-# Images saturate individually (no fully-unobserved b x b window left).
+# Speed: per candidate row-chunk 1 mu + K*(H sigma + (H-1) mu) forwards
+# (the level-1 mu prediction is computed once and reused across the K
+# chains). --topk 16 pre-screening as in lookahead. Images saturate
+# individually (no fully-unobserved b x b window left).
 #
 # Initial block: random only, seeded through --seed (same protocol and
 # RNG call order as the other random-start strategies). There is NO
@@ -59,7 +75,7 @@
 # Usage:
 #   python select_and_save_patch_index_lookahead_sample.py \
 #       --fname configs/configs.yaml --T 49 --b 2 --seed 0 \
-#       [--samples 1] [--topk 16] [--batch_size 64] [--preload]
+#       [--samples 1] [--horizon 1] [--topk 16] [--batch_size 64] [--preload]
 
 import argparse
 import json
@@ -102,8 +118,17 @@ parser.add_argument(
 parser.add_argument(
     '--samples', type=int, default=1,
     help='sampled rollouts averaged per candidate (default 1 = the pure '
-         'sampling variant; K > 1 averages the score over K samples for a '
+         'sampling variant; K > 1 averages the score over K chains for a '
          'less noisy choice)')
+parser.add_argument(
+    '--horizon', type=int, default=1,
+    help='number of simulated lookahead steps per candidate (default 1 = '
+         'the one-step rollout). H > 1 continues the chain inside the '
+         'simulation: at every further simulated level the next block is '
+         'chosen greedily from the model\'s own simulated sigma map, its '
+         'features are sampled the same way, and the score is the total '
+         'remaining sigma after the whole chain. Names are h<H>-tagged for '
+         'H>1. Cost per row-chunk: 1 mu + K*(H sigma + (H-1) mu) forwards')
 parser.add_argument(
     '--batch_size', type=int, default=64,
     help='rows (image x candidate) forwarded together; selection is '
@@ -128,6 +153,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.samples < 1:
         parser.error("--samples must be >= 1")
+    if args.horizon < 1:
+        parser.error("--horizon must be >= 1")
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -340,10 +367,15 @@ if __name__ == "__main__":
                     -pool_np[ai][valid], kind='stable')[:args.topk]]
                 for ai, valid in enumerate(valid_all)]
 
-        # -- simulate every candidate: SAMPLE the candidate features from
-        #    the predictive distribution (mu +/- sigma at the candidate
-        #    patches of the CURRENT sigma map), then score the synthetic
-        #    next context with the sigma predictor (mean over --samples)
+        # -- simulate every candidate with a --horizon-step cascade rollout:
+        #    level 1 = the candidate itself (features SAMPLED from the
+        #    predictive distribution: mu + sqrt(sigma_map) * eps); at every
+        #    FURTHER level the next block is chosen GREEDILY from the
+        #    model's own simulated sigma map, sampled the same way, and the
+        #    score is the total remaining sigma after the whole chain.
+        #    Anti-peeking holds: only predicted/sampled features and the
+        #    model's own maps enter the simulation. horizon=1 reduces to
+        #    the previous one-step rollout.
         rep, cand, img_seg = [], [], []
         for ai, valid in enumerate(valid_used):
             img_seg.append((len(rep), len(valid)))
@@ -352,52 +384,94 @@ if __name__ == "__main__":
         reps = rep                            # flattened image index per row
         cands = cand
         seg_bounds = img_seg
-        kp2 = block_size * block_size
+        windows_t = torch.tensor(window_matrix, dtype=torch.long,
+                                 device=device)        # (n_pos^2, b^2)
         scores = []
         for r0 in range(0, len(reps), args.batch_size):
             rsl = slice(r0, r0 + args.batch_size)
             rr = reps[rsl]
             cc = cands[rsl]
             R = len(rr)
+            rr_t = torch.tensor(rr, device=device)
             x_ctx = torch.stack([feats[ai] for ai in rr])  # (R, k, D)
             with torch.no_grad():
-                # predicted FEATURES of the (virtual) candidate block
+                # level 1: predicted FEATURES of the (virtual) candidate
+                # block, mean reused across the K chains
                 cand_idx = torch.tensor(window_matrix[cc],
                                         dtype=torch.long, device=device)
-                pred = predictor(
+                mu1 = predictor(
                     x_ctx,
                     [torch.tensor(ctx_mat[rr], dtype=torch.long,
                                   device=device)],
                     [cand_idx])                           # (R, b^2, D)
                 # sampling std at the candidate patches: sqrt of the CURRENT
-                # sigma-map values of each row's image. The sigma head
-                # outputs the VARIANCE (the train loss e/v + log v matches a
-                # Gaussian NLL with variance = output), so the sampling
-                # amplitude is the square root, not the raw value
-                std_c = (sigma_cur[torch.tensor(rr, device=device)]
-                         .gather(1, cand_idx)
-                         .clamp_min(0.0).sqrt().unsqueeze(-1))   # (R, b^2, 1)
-                ctxC = torch.cat(
-                    [torch.tensor(ctx_mat[rr], dtype=torch.long,
-                                  device=device),
-                     cand_idx], dim=1)
+                # sigma-map values. The sigma head outputs the VARIANCE
+                # (the train loss e/v + log v matches a Gaussian NLL with
+                # variance = output), so the sampling amplitude is the
+                # square root, not the raw value
+                std1 = (sigma_cur[rr_t]
+                        .gather(1, cand_idx)
+                        .clamp_min(0.0).sqrt().unsqueeze(-1))   # (R, b^2, 1)
+                ctx_t = torch.tensor(ctx_mat[rr], dtype=torch.long,
+                                     device=device)
+                # baseline occupancy = the observed context only
+                occ0 = torch.zeros(R, 196, dtype=torch.bool, device=device)
+                occ0[rows_ar(R), ctx_t] = True
+
                 acc = torch.zeros(R, device=device)
                 for _ in range(args.samples):
-                    # sampled candidate features: mu + sigma * eps,
-                    # eps ~ N(0, I) of the mu-feature shape
-                    eps = torch.randn(pred.shape, generator=sample_gen,
-                                      device=device)
-                    x_next = torch.cat([x_ctx, pred + std_c * eps], dim=1)
-                    # 1-step-ahead uncertainty map of the synthetic context
-                    sigma = sigma_head(sigma_predictor(
-                        x_next, [ctxC],
+                    # --- one independent rollout chain ------------------
+                    occ = occ0.clone()
+                    sim = torch.cat(
+                        [x_ctx,
+                         mu1 + std1 * torch.randn(mu1.shape,
+                                                  generator=sample_gen,
+                                                  device=device)], dim=1)
+                    pos = torch.cat([ctx_t, cand_idx], dim=1)  # (R, k+b^2)
+                    occ[rows_ar(R), cand_idx] = True
+                    sig = sigma_head(sigma_predictor(
+                        sim, [pos],
                         [full_idx.unsqueeze(0).repeat(R, 1)]))
-                    if sigma.dim() == 3:
-                        sigma = sigma.squeeze(-1)         # (R, 196)
+                    if sig.dim() == 3:
+                        sig = sig.squeeze(-1)             # (R, 196)
+                    # --- inner rollout: levels 2..horizon ---------------
+                    for _lvl in range(2, args.horizon + 1):
+                        overlap = (occ[:, windows_t]
+                                   .any(dim=2))            # (R, n_pos^2)
+                        have = ~overlap
+                        if not bool(have.any()):
+                            # no valid anchor left for ANY row: stop the
+                            # chain and score with the map built so far
+                            break
+                        # greedy inner pick from the SIMULATED sigma map
+                        pooled = F.avg_pool2d(
+                            sig.reshape(-1, 1, 14, 14),
+                            kernel_size=block_size, stride=1)
+                        pooled = (pooled.reshape(R, n_pos, n_pos)
+                                        .transpose(1, 2)
+                                        .reshape(R, -1))   # le-major order
+                        choose = pooled.masked_fill(
+                            ~have, float("-inf")).argmax(dim=1)
+                        w_i = windows_t[choose]            # (R, b^2)
+                        mu_i = predictor(sim, [pos], [w_i])  # (R, b^2, D)
+                        std_i = (sig.gather(1, w_i)
+                                    .clamp_min(0.0).sqrt()
+                                    .unsqueeze(-1))        # (R, b^2, 1)
+                        sim = torch.cat(
+                            [sim,
+                             mu_i + std_i * torch.randn(
+                                 mu_i.shape, generator=sample_gen,
+                                 device=device)], dim=1)
+                        pos = torch.cat([pos, w_i], dim=1)
+                        occ[rows_ar(R), w_i] = True
+                        sig = sigma_head(sigma_predictor(
+                            sim, [pos],
+                            [full_idx.unsqueeze(0).repeat(R, 1)]))
+                        if sig.dim() == 3:
+                            sig = sig.squeeze(-1)
                     # score = total sigma over the still-unobserved patches
-                    rem = torch.ones(R, 196, dtype=torch.bool, device=device)
-                    rem[rows_ar(R), ctxC] = False
-                    acc = acc + sigma.masked_fill(~rem, 0.0).sum(dim=1)
+                    # (occupancy includes the chain's simulated blocks)
+                    acc = acc + sig.masked_fill(occ, 0.0).sum(dim=1)
                 scores.append(acc / args.samples)
 
         scores = torch.cat(scores)                        # (rows,)
@@ -464,13 +538,15 @@ if __name__ == "__main__":
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    # K-tagged variant name: K=1 -> "lookahead_sample" (the pure sampling
-    # variant), K>1 -> "lookahead_sample<K>" (so K=1 and K=4 artefacts
-    # coexist without collision in the eval glob / comparison plots)
+    # K/H-tagged variant name: K=1, H=1 -> "lookahead_sample" (the pure
+    # one-step sampling variant), K>1 -> "lookahead_sample<K>",
+    # H>1 appends h<H> (e.g. K=1, H=2 -> "lookahead_sampleh2"; K=4, H=2 ->
+    # "lookahead_sample4h2") so every (K, H) artefact coexists
     if args.samples == 1:
-        suffix = "lookahead_sample"
+        base = "lookahead_sample"
     else:
-        suffix = f"lookahead_sample{args.samples}"
+        base = f"lookahead_sample{args.samples}"
+    suffix = base if args.horizon == 1 else f"{base}h{args.horizon}"
     with open(os.path.join(args.outdir,
               f"block_{block_size}_tmax_{T}_test_{suffix}.json",
               ), "w") as f:
@@ -481,7 +557,7 @@ if __name__ == "__main__":
     stats = {
         "meta": {"strategy": suffix, "b": block_size, "T": T,
                  "seed": args.seed, "start": "random", "topk": args.topk,
-                 "samples": args.samples, "N": N},
+                 "samples": args.samples, "horizon": args.horizon, "N": N},
         "sigma_sum": sigma_sum_traj,
         "chosen_sigma_rank": chosen_rank,
         "n_valid_anchors": n_valid_traj,
@@ -492,4 +568,4 @@ if __name__ == "__main__":
         json.dump(stats, f)
 
     print(f"saved selection+stats -> {args.outdir} "
-          f"({suffix}, samples={args.samples})")
+          f"({suffix}, samples={args.samples}, horizon={args.horizon})")

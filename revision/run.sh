@@ -62,11 +62,17 @@
 #                          automatically when CUDA is unavailable)
 #     BATCH=<n>            rows per selection forward (default 64)
 #     SEEDS="0 1 2 3 4"    default seed list
-#     SAMPLES="1 4"        sampled-rollout K values to RUN (default "1 4":
-#                          both the pure sampling variant and the K=4
-#                          averaged variant). Artefact names are K-tagged:
+#     SAMPLES="1"          sampled-rollout K values to RUN (K chains averaged;
+#                          default "1"). Artefact names are K-tagged:
 #                          K=1 -> ..._test_lookahead_sample.json,
 #                          K>1 -> ..._test_lookahead_sample<K>.json
+#     HORIZON="2"          cascade-rollout horizons H to RUN (default "2":
+#                          look 1 step ahead in the SAMPLING sense; the
+#                          simulated chain continues for H levels, every
+#                          further level greedily picks its next block from
+#                          the model's own simulated sigma map). H=1 gives
+#                          the plain one-step names, H>1 appends h<H>
+#                          (K=1, H=2 -> ..._test_lookahead_sampleh2.json)
 #     TOPK=<k>             candidate pre-screen size (default 16)
 #     MAX_T=<n>            cap the selection horizon for smoke tests
 #                          (the actual tmax is in the JSON names, so smoke
@@ -85,13 +91,14 @@ CONFIG=${CONFIG:-configs/configs.yaml}
 DEVICE=${DEVICE:-cuda:0}
 BATCH=${BATCH:-64}
 SEEDS=${SEEDS:-"0 1 2 3 4"}
-SAMPLES=${SAMPLES:-"1 4"}
+SAMPLES=${SAMPLES:-"1"}
+HORIZON=${HORIZON:-"2"}
 TOPK=${TOPK:-16}
 SEL_ROOT=${SEL_ROOT:-selected_patch_index_lookahead_sample}
 EVAL_ROOT=${EVAL_ROOT:-images/rec_image_lookahead_sample}
 
 echo "python : $($PY --version 2>&1)"
-echo "samples=[$SAMPLES]  topk=$TOPK  seeds=[$SEEDS]  device=$DEVICE  batch=$BATCH  config=$CONFIG"
+echo "samples=[$SAMPLES]  horizon=[$HORIZON]  topk=$TOPK  seeds=[$SEEDS]  device=$DEVICE  batch=$BATCH  config=$CONFIG"
 
 # -----------------------------------------------------------------------
 # Per seed: sampled-rollout lookahead selection (b = 2..4, random start)
@@ -119,23 +126,28 @@ for SEED in $SEEDS; do
         fi
         echo "### seed $SEED, b=$b (tmax=$TMAX)"
 
-        # (a) sampled-rollout 1-step lookahead selection (random start),
-        #     one run per K in SAMPLES (default "1 4"); the artefact name
-        #     carries the K tag (see the header notes)
+        # (a) sampled-rollout lookahead selection (random start), one run
+        #     per (K, H) pair in SAMPLES x HORIZON (defaults K="1",
+        #     H="2"); the artefact name carries the K/H tags
         EVAL_VARS=()
         for K in $SAMPLES; do
-            if [ "$K" = "1" ]; then
-                VAR="lookahead_sample"
-            else
-                VAR="lookahead_sample${K}"
-            fi
-            echo "### seed $SEED, b=$b, samples=$K (variant: $VAR)"
-            "$PY" select_and_save_patch_index_lookahead_sample.py \
-                  --fname "$CONFIG" --T "$TMAX" --b "$b" --seed "$SEED" \
-                  --device "$DEVICE" --samples "$K" --topk "$TOPK" \
-                  --preload --batch_size "$BATCH" \
-                  --outdir "$SEL_DIR"
-            EVAL_VARS+=("$VAR")
+            for H in $HORIZON; do
+                if [ "$K" = "1" ]; then
+                    VAR="lookahead_sample"
+                else
+                    VAR="lookahead_sample${K}"
+                fi
+                if [ "$H" != "1" ]; then
+                    VAR="${VAR}h${H}"
+                fi
+                echo "### seed $SEED, b=$b, samples=$K, horizon=$H (variant: $VAR)"
+                "$PY" select_and_save_patch_index_lookahead_sample.py \
+                      --fname "$CONFIG" --T "$TMAX" --b "$b" --seed "$SEED" \
+                      --device "$DEVICE" --samples "$K" --horizon "$H" \
+                      --topk "$TOPK" --preload --batch_size "$BATCH" \
+                      --outdir "$SEL_DIR"
+                EVAL_VARS+=("$VAR")
+            done
         done
 
         # (b) MAE reconstruction-error-vs-t evaluation of THIS experiment's
