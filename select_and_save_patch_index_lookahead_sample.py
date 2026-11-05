@@ -47,10 +47,15 @@
 # level-2 block is itself simulated (leaf = image x level-1 x level-2) and
 # the score of a level-1 candidate is the minimum residual sigma over its
 # leaves — the exact two-step lookahead objective — averaged over the K
-# chains. Cost: ~8.5x the greedy-inner H=2 rollout (~topk^2 rows per
-# image-step); topk^H explodes for H>=3, so full branching is restricted
-# to horizon=2 (parser error otherwise). The artefact name appends "fb"
-# (lookahead_sampleh2fb for K=1, H=2, full).
+# chains. AND: the rollout result is OBSERVED — the selection advances by
+# TWO blocks per real step (the argmin level-1 block plus, for real, the
+# argmin level-2 block it computed; exact for the default K=1, the first
+# chain's argmin for K>1; skipped when the row has no valid inner block).
+# Cost: ~8.5x the greedy-inner H=2 rollout (~topk^2 rows per image-step);
+# topk^H explodes for H>=3, so full branching is restricted to horizon=2
+# (parser error otherwise). Name: the "fb" tag is replaced by "pair"
+# (lookahead_sampleh2pair for K=1, H=2, full) — the name reflects the
+# two-blocks-per-step observation.
 #
 # The score is therefore an estimate built only from information available
 # at the current step (observed encoder features + the model's own
@@ -146,7 +151,9 @@ parser.add_argument(
          '(H=2 only) enumerates ALL --topk level-2 blocks per level-1 '
          'candidate (topk^2 rows per image-step, ~8.5x the greedy cost) '
          'and scores a level-1 candidate by the minimum residual sigma over '
-         'its leaves (the exact two-step objective). - "fb"-tagged names')
+         'its leaves (the exact two-step objective). Moreover the chosen '
+         'best level-2 block is OBSERVED alongside the level-1 winner: the '
+         'selection advances 2 blocks per real step ("pair" variant)')
 parser.add_argument(
     '--batch_size', type=int, default=64,
     help='rows (image x candidate) forwarded together; selection is '
@@ -405,6 +412,10 @@ if __name__ == "__main__":
         reps = rep                            # flattened image index per row
         cands = cand
         seg_bounds = img_seg
+        # pair mode: the level-2 block that achieved the residual argmin in
+        # the FIRST rollout chain, per level-1 row (observed for real when
+        # --branch full / horizon > 1); global row alignment
+        pair_c2 = [None] * len(reps)
         windows_t = torch.tensor(window_matrix, dtype=torch.long,
                                  device=device)        # (n_pos^2, b^2)
         scores = []
@@ -449,6 +460,9 @@ if __name__ == "__main__":
                     # inner candidate set is re-derived from each chain's
                     # own simulated map, so chains are independent.
                     pos1 = torch.cat([ctx_t, cand_idx], dim=1)
+                    # second observed block per level-1 row (filled by the
+                    # first chain's residual-argmin leaf)
+                    pair_c2_local = [None] * R
                     for _ in range(args.samples):
                         f1 = mu1 + std1 * torch.randn(
                             mu1.shape, generator=sample_gen, device=device)
@@ -508,10 +522,28 @@ if __name__ == "__main__":
                             leaf_occ = occ2.clone()
                             leaf_occ[rows_ar(occ2.shape[0]), w2] = True
                             leaf_score = sig2.masked_fill(leaf_occ, 0).sum(1)
+                            # residual-argmin c2 per level-1 row from the
+                            # FIRST chain (= the second block of the
+                            # actually observed pair; exact for the default
+                            # K=1). rows2 is grouped contiguously per r1.
+                            if _ == 0:
+                                i = 0
+                                while i < len(rows2):
+                                    r1 = rows2[i]
+                                    j = i
+                                    while (j < len(rows2)
+                                           and rows2[j] == r1):
+                                        j += 1
+                                    m = min(range(i, j),
+                                            key=lambda t: float(
+                                                leaf_score[t]))
+                                    pair_c2_local[r1] = c2list[m]
+                                    i = j
                             chain_min.scatter_reduce_(
                                 0, r1_idx, leaf_score, reduce="amin",
                                 include_self=True)
                         acc = acc + chain_min
+                    pair_c2[r0:r0 + R] = pair_c2_local
                 else:
                     # ---------- greedy-inner cascade (default) ------------
                     for _ in range(args.samples):
@@ -576,10 +608,21 @@ if __name__ == "__main__":
             start, cnt = seg_bounds[ai]
             if cnt == 0:
                 continue
-            best = cands[start + int(scores[start:start + cnt].argmin().item())]
+            arg = int(scores[start:start + cnt].argmin().item())
+            row1 = start + arg
+            best = cands[row1]
             win = anchor_windows[best]
             contexts[i].extend(win)
             observed[i, win] = True
+            # pair mode (--branch full, horizon > 1): the argmin level-2
+            # block computed for this rollout is observed as well, so the
+            # selection advances 2 blocks per real step
+            if args.horizon > 1 and args.branch == "full":
+                c2a = pair_c2[row1]
+                if c2a is not None:
+                    win2 = anchor_windows[c2a]
+                    contexts[i].extend(win2)
+                    observed[i, win2] = True
             # rank of the chosen anchor in the current pooled-sigma ranking
             # over ALL valid anchors (1 = the sigma-greedy choice); same
             # ordering rule as the --topk pre-screening (stable argsort)
@@ -633,11 +676,12 @@ if __name__ == "__main__":
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    # K/H/branch-tagged variant name: K=1, H=1 -> "lookahead_sample" (the
+    # K/H/mode-tagged variant name: K=1, H=1 -> "lookahead_sample" (the
     # pure one-step sampling variant), K>1 -> "lookahead_sample<K>",
-    # H>1 appends h<H>, and full branching appends "fb"
+    # H>1 appends h<H>, and full branching (pair observation) appends
+    # "pair" instead of a branch tag
     # (e.g. K=1, H=2, greedy-inner -> "lookahead_sampleh2";
-    #       K=1, H=2, full branch -> "lookahead_sampleh2fb") so every
+    #       K=1, H=2, full / pair -> "lookahead_sampleh2pair") so every
     # (K, H, branch) artefact coexists
     if args.samples == 1:
         base = "lookahead_sample"
@@ -646,7 +690,7 @@ if __name__ == "__main__":
     if args.horizon > 1:
         base = f"{base}h{args.horizon}"
     if args.branch == "full" and args.horizon > 1:
-        base = f"{base}fb"
+        base = f"{base}pair"
     suffix = base
     with open(os.path.join(args.outdir,
               f"block_{block_size}_tmax_{T}_test_{suffix}.json",

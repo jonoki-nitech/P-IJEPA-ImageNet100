@@ -24,7 +24,7 @@ bash revision/run.sh 2>&1 | tee run_sample_lookahead.log
 
 - 選択JSONの名前はK(サンプリング数)/H(horizon)/分岐方式で区別されます:
   - K=1, H=1 → `block_<b>_tmax_<T>_test_lookahead_sample.json`
-  - K>1 → 末尾に `<K>`， H>1 → 末尾に `h<H>`，inner分岐方式がfull(H=2)のとき、さらに `fb`
+  - K>1 → 末尾に `<K>`， H>1 → 末尾に `h<H>`，full分岐(H=2)で最適ペアを実観測する変種はさらに `pair`
     （例: K=1, H=2, greedy-inner → `..._lookahead_sampleh2.json`,
-     K=1, H=2, full-branch → `..._lookahead_sampleh2fb.json`）
-- `run.sh` のデフォルトは K=1, H=2, full-branch（`SAMPLES`/`HORIZON`/`BRANCH` envで変更可）
+     K=1, H=2, full(pair観測) → `..._lookahead_sampleh2pair.json`）
+- `run.sh` のデフォルトは K=1, H=2, full(ペア観測)（`SAMPLES`/`HORIZON`/`BRANCH` envで変更可）

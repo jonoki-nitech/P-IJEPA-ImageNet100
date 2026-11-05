@@ -81,7 +81,11 @@
 #                          blocks per level-1 candidate and score by the
 #                          minimum residual sigma (exact 2-step objective;
 #                          ~8.5x the greedy cost, ~1.5-2 days selection).
-#                          "fb"-tagged artefact names (HOR=2 -> sampleh2fb)
+#                          In full mode the argmin level-2 block is
+#                          OBSERVED for real together with the level-1
+#                          winner (2 blocks per step: "pair" strategy;
+#                          "pair"-tagged artefact names, e.g.
+#                          lookahead_sampleh2pair for K=1/H=2).
 #     MAX_T=<n>            cap the selection horizon for smoke tests
 #                          (the actual tmax is in the JSON names, so smoke
 #                          artefacts never collide with full-run ones)
@@ -150,7 +154,7 @@ for SEED in $SEEDS; do
                     VAR="${VAR}h${H}"
                 fi
                 if [ "$BRANCH" = "full" ] && [ "$H" != "1" ]; then
-                    VAR="${VAR}fb"
+                    VAR="${VAR}pair"
                 fi
                 echo "### seed $SEED, b=$b, samples=$K, horizon=$H, branch=$BRANCH (variant: $VAR)"
                 "$PY" select_and_save_patch_index_lookahead_sample.py \
