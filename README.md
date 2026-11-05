@@ -22,7 +22,9 @@ bash revision/run.sh 2>&1 | tee run_sample_lookahead.log
 | MAE reconstruction-error-vs-t評価(この実験の全variantの行を含む)                                  | `images/rec_image_lookahead_sample/<seed-path>/b<b>/` |
 | 全成果物(seed 0..4； 選択 + 評価； ディレクトリ構造をそのまま)を1本に圧縮したzip               | `result.zip`                                          |
 
-- 選択JSONの名前はK(サンプリング数)/H(horizon)で区別されます:
+- 選択JSONの名前はK(サンプリング数)/H(horizon)/分岐方式で区別されます:
   - K=1, H=1 → `block_<b>_tmax_<T>_test_lookahead_sample.json`
-  - K>1 → 末尾に `<K>`， H>1 → 末尾に `h<H>`（例: K=4, H=2 → `..._lookahead_sample4h2.json`）
-- `run.sh` のデフォルトは K=1, H=2（`SAMPLES`/`HORIZON` envで変更可）
+  - K>1 → 末尾に `<K>`， H>1 → 末尾に `h<H>`，inner分岐方式がfull(H=2)のとき、さらに `fb`
+    （例: K=1, H=2, greedy-inner → `..._lookahead_sampleh2.json`,
+     K=1, H=2, full-branch → `..._lookahead_sampleh2fb.json`）
+- `run.sh` のデフォルトは K=1, H=2, full-branch（`SAMPLES`/`HORIZON`/`BRANCH` envで変更可）

@@ -73,7 +73,15 @@
 #                          the model's own simulated sigma map). H=1 gives
 #                          the plain one-step names, H>1 appends h<H>
 #                          (K=1, H=2 -> ..._test_lookahead_sampleh2.json)
-#     TOPK=<k>             candidate pre-screen size (default 16)
+#     TOPK=<k>             candidate pre-screen size (default 16); also the
+#                          level-2 branching width when BRANCH=full
+#     BRANCH=<greedy|full> inner-rollout rule for H>1 (default "full"):
+#                          "greedy" = 1 greedy block per simulated level,
+#                          "full" (H=2 only) = enumerate ALL topk level-2
+#                          blocks per level-1 candidate and score by the
+#                          minimum residual sigma (exact 2-step objective;
+#                          ~8.5x the greedy cost, ~1.5-2 days selection).
+#                          "fb"-tagged artefact names (HOR=2 -> sampleh2fb)
 #     MAX_T=<n>            cap the selection horizon for smoke tests
 #                          (the actual tmax is in the JSON names, so smoke
 #                          artefacts never collide with full-run ones)
@@ -93,12 +101,13 @@ BATCH=${BATCH:-64}
 SEEDS=${SEEDS:-"0 1 2 3 4"}
 SAMPLES=${SAMPLES:-"1"}
 HORIZON=${HORIZON:-"2"}
+BRANCH=${BRANCH:-full}
 TOPK=${TOPK:-16}
 SEL_ROOT=${SEL_ROOT:-selected_patch_index_lookahead_sample}
 EVAL_ROOT=${EVAL_ROOT:-images/rec_image_lookahead_sample}
 
 echo "python : $($PY --version 2>&1)"
-echo "samples=[$SAMPLES]  horizon=[$HORIZON]  topk=$TOPK  seeds=[$SEEDS]  device=$DEVICE  batch=$BATCH  config=$CONFIG"
+echo "samples=[$SAMPLES]  horizon=[$HORIZON]  branch=$BRANCH  topk=$TOPK  seeds=[$SEEDS]  device=$DEVICE  batch=$BATCH  config=$CONFIG"
 
 # -----------------------------------------------------------------------
 # Per seed: sampled-rollout lookahead selection (b = 2..4, random start)
@@ -140,11 +149,15 @@ for SEED in $SEEDS; do
                 if [ "$H" != "1" ]; then
                     VAR="${VAR}h${H}"
                 fi
-                echo "### seed $SEED, b=$b, samples=$K, horizon=$H (variant: $VAR)"
+                if [ "$BRANCH" = "full" ] && [ "$H" != "1" ]; then
+                    VAR="${VAR}fb"
+                fi
+                echo "### seed $SEED, b=$b, samples=$K, horizon=$H, branch=$BRANCH (variant: $VAR)"
                 "$PY" select_and_save_patch_index_lookahead_sample.py \
                       --fname "$CONFIG" --T "$TMAX" --b "$b" --seed "$SEED" \
                       --device "$DEVICE" --samples "$K" --horizon "$H" \
-                      --topk "$TOPK" --preload --batch_size "$BATCH" \
+                      --branch "$BRANCH" --topk "$TOPK" \
+                      --preload --batch_size "$BATCH" \
                       --outdir "$SEL_DIR"
                 EVAL_VARS+=("$VAR")
             done

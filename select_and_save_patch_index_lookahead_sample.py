@@ -42,6 +42,16 @@
 # lookahead_sample<K>); horizon>1 appends h<H>
 # (e.g. lookahead_sampleh2 for K=1, H=2).
 #
+# --branch full (H=2 only) upgrades the INNER level to a full enumeration:
+# instead of picking one greedy block inside the simulation, EVERY topk
+# level-2 block is itself simulated (leaf = image x level-1 x level-2) and
+# the score of a level-1 candidate is the minimum residual sigma over its
+# leaves — the exact two-step lookahead objective — averaged over the K
+# chains. Cost: ~8.5x the greedy-inner H=2 rollout (~topk^2 rows per
+# image-step); topk^H explodes for H>=3, so full branching is restricted
+# to horizon=2 (parser error otherwise). The artefact name appends "fb"
+# (lookahead_sampleh2fb for K=1, H=2, full).
+#
 # The score is therefore an estimate built only from information available
 # at the current step (observed encoder features + the model's own
 # predictions); the true encoder features of the candidates are never
@@ -130,6 +140,14 @@ parser.add_argument(
          'remaining sigma after the whole chain. Names are h<H>-tagged for '
          'H>1. Cost per row-chunk: 1 mu + K*(H sigma + (H-1) mu) forwards')
 parser.add_argument(
+    '--branch', type=str, default='greedy', choices=['greedy', 'full'],
+    help='inner-rollout rule for horizon>1: "greedy" (default) picks ONE '
+         'block per simulated level from the simulated sigma map; "full" '
+         '(H=2 only) enumerates ALL --topk level-2 blocks per level-1 '
+         'candidate (topk^2 rows per image-step, ~8.5x the greedy cost) '
+         'and scores a level-1 candidate by the minimum residual sigma over '
+         'its leaves (the exact two-step objective). - "fb"-tagged names')
+parser.add_argument(
     '--batch_size', type=int, default=64,
     help='rows (image x candidate) forwarded together; selection is '
          'per-image independent, so this does not change the selection')
@@ -155,6 +173,9 @@ if __name__ == "__main__":
         parser.error("--samples must be >= 1")
     if args.horizon < 1:
         parser.error("--horizon must be >= 1")
+    if args.branch == "full" and args.horizon != 2:
+        parser.error("--branch full requires --horizon 2 (topk^H explodes "
+                     "for H>=3; H=1 has no inner level to branch)")
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -419,59 +440,133 @@ if __name__ == "__main__":
                 occ0[rows_ar(R), ctx_t] = True
 
                 acc = torch.zeros(R, device=device)
-                for _ in range(args.samples):
-                    # --- one independent rollout chain ------------------
-                    occ = occ0.clone()
-                    sim = torch.cat(
-                        [x_ctx,
-                         mu1 + std1 * torch.randn(mu1.shape,
-                                                  generator=sample_gen,
-                                                  device=device)], dim=1)
-                    pos = torch.cat([ctx_t, cand_idx], dim=1)  # (R, k+b^2)
-                    occ[rows_ar(R), cand_idx] = True
-                    sig = sigma_head(sigma_predictor(
-                        sim, [pos],
-                        [full_idx.unsqueeze(0).repeat(R, 1)]))
-                    if sig.dim() == 3:
-                        sig = sig.squeeze(-1)             # (R, 196)
-                    # --- inner rollout: levels 2..horizon ---------------
-                    for _lvl in range(2, args.horizon + 1):
-                        overlap = (occ[:, windows_t]
-                                   .any(dim=2))            # (R, n_pos^2)
-                        have = ~overlap
-                        if not bool(have.any()):
-                            # no valid anchor left for ANY row: stop the
-                            # chain and score with the map built so far
-                            break
-                        # greedy inner pick from the SIMULATED sigma map
-                        pooled = F.avg_pool2d(
-                            sig.reshape(-1, 1, 14, 14),
+                if args.horizon > 1 and args.branch == "full":
+                    # ---------- FULL BRANCHING (level 2 enumerated) --------
+                    # leaf = (image, level-1 block c1, level-2 block c2):
+                    # the score of c1 is the MINIMUM residual sigma over its
+                    # level-2 options (the exact 2-step objective; ties with
+                    # an equal number of simulated blocks per leaf). The
+                    # inner candidate set is re-derived from each chain's
+                    # own simulated map, so chains are independent.
+                    pos1 = torch.cat([ctx_t, cand_idx], dim=1)
+                    for _ in range(args.samples):
+                        f1 = mu1 + std1 * torch.randn(
+                            mu1.shape, generator=sample_gen, device=device)
+                        sim1 = torch.cat([x_ctx, f1], dim=1)
+                        sig1 = sigma_head(sigma_predictor(
+                            sim1, [pos1],
+                            [full_idx.unsqueeze(0).repeat(R, 1)]))
+                        if sig1.dim() == 3:
+                            sig1 = sig1.squeeze(-1)       # (R, 196)
+                        occ1 = occ0.clone()
+                        occ1[rows_ar(R), cand_idx] = True
+                        overlap = occ1[:, windows_t].any(dim=2)
+                        have = ~overlap                   # (R, n_pos^2)
+                        pooled = (F.avg_pool2d(
+                            sig1.reshape(-1, 1, 14, 14),
                             kernel_size=block_size, stride=1)
-                        pooled = (pooled.reshape(R, n_pos, n_pos)
-                                        .transpose(1, 2)
-                                        .reshape(R, -1))   # le-major order
-                        choose = pooled.masked_fill(
-                            ~have, float("-inf")).argmax(dim=1)
-                        w_i = windows_t[choose]            # (R, b^2)
-                        mu_i = predictor(sim, [pos], [w_i])  # (R, b^2, D)
-                        std_i = (sig.gather(1, w_i)
-                                    .clamp_min(0.0).sqrt()
-                                    .unsqueeze(-1))        # (R, b^2, 1)
+                            .reshape(R, n_pos, n_pos)
+                            .transpose(1, 2).reshape(R, -1))
+                        pooled = pooled.masked_fill(~have, float("-inf"))
+                        # leaf list: per level-1 row, up to --topk inner
+                        # candidates (finite pooled sigma = valid anchor)
+                        rows2, c2list = [], []
+                        for r1 in range(R):
+                            kk = int(min(args.topk, have[r1].sum().item()))
+                            if kk == 0:
+                                continue   # no valid inner block for this leaf
+                            sel = torch.topk(pooled[r1], kk).indices.tolist()
+                            rows2.extend([r1] * kk)
+                            c2list.extend(sel)
+                        # per-row fallback: no inner block (image nearly
+                        # saturated) -> score c1 on the level-1 residual
+                        chain_min = sig1.masked_fill(occ1, 0.0).sum(dim=1)
+                        if rows2:
+                            r1_idx = torch.tensor(rows2, dtype=torch.long,
+                                                  device=device)
+                            w2 = windows_t[torch.tensor(
+                                c2list, dtype=torch.long, device=device)]
+                            sim_base = sim1[r1_idx]       # (L, k+b^2, D)
+                            pos1_exp = pos1[r1_idx]       # (L, k+b^2)
+                            sig1_exp = sig1[r1_idx]       # (L, 196)
+                            mu2 = predictor(sim_base, [pos1_exp], [w2])
+                            std2 = (sig1_exp.gather(1, w2)
+                                    .clamp_min(0.0).sqrt().unsqueeze(-1))
+                            leaf = torch.cat(
+                                [sim_base,
+                                 mu2 + std2 * torch.randn(
+                                     mu2.shape, generator=sample_gen,
+                                     device=device)], dim=1)
+                            pos2 = torch.cat([pos1_exp, w2], dim=1)
+                            occ2 = occ1[r1_idx]
+                            sig2 = sigma_head(sigma_predictor(
+                                leaf, [pos2],
+                                [full_idx.unsqueeze(0).repeat(occ2.shape[0],
+                                                              1)]))
+                            if sig2.dim() == 3:
+                                sig2 = sig2.squeeze(-1)
+                            leaf_occ = occ2.clone()
+                            leaf_occ[rows_ar(occ2.shape[0]), w2] = True
+                            leaf_score = sig2.masked_fill(leaf_occ, 0).sum(1)
+                            chain_min.scatter_reduce_(
+                                0, r1_idx, leaf_score, reduce="amin",
+                                include_self=True)
+                        acc = acc + chain_min
+                else:
+                    # ---------- greedy-inner cascade (default) ------------
+                    for _ in range(args.samples):
+                        # --- one independent rollout chain ------------------
+                        occ = occ0.clone()
                         sim = torch.cat(
-                            [sim,
-                             mu_i + std_i * torch.randn(
-                                 mu_i.shape, generator=sample_gen,
-                                 device=device)], dim=1)
-                        pos = torch.cat([pos, w_i], dim=1)
-                        occ[rows_ar(R), w_i] = True
+                            [x_ctx,
+                             mu1 + std1 * torch.randn(mu1.shape,
+                                                      generator=sample_gen,
+                                                      device=device)], dim=1)
+                        pos = torch.cat([ctx_t, cand_idx], dim=1)  # (R, k+b^2)
+                        occ[rows_ar(R), cand_idx] = True
                         sig = sigma_head(sigma_predictor(
                             sim, [pos],
                             [full_idx.unsqueeze(0).repeat(R, 1)]))
                         if sig.dim() == 3:
-                            sig = sig.squeeze(-1)
-                    # score = total sigma over the still-unobserved patches
-                    # (occupancy includes the chain's simulated blocks)
-                    acc = acc + sig.masked_fill(occ, 0.0).sum(dim=1)
+                            sig = sig.squeeze(-1)             # (R, 196)
+                        # --- inner rollout: levels 2..horizon ---------------
+                        for _lvl in range(2, args.horizon + 1):
+                            overlap = (occ[:, windows_t]
+                                       .any(dim=2))            # (R, n_pos^2)
+                            have = ~overlap
+                            if not bool(have.any()):
+                                # no valid anchor left for ANY row: stop the
+                                # chain and score with the map built so far
+                                break
+                            # greedy inner pick from the SIMULATED sigma map
+                            pooled = F.avg_pool2d(
+                                sig.reshape(-1, 1, 14, 14),
+                                kernel_size=block_size, stride=1)
+                            pooled = (pooled.reshape(R, n_pos, n_pos)
+                                            .transpose(1, 2)
+                                            .reshape(R, -1))   # le-major order
+                            choose = pooled.masked_fill(
+                                ~have, float("-inf")).argmax(dim=1)
+                            w_i = windows_t[choose]            # (R, b^2)
+                            mu_i = predictor(sim, [pos], [w_i])  # (R, b^2, D)
+                            std_i = (sig.gather(1, w_i)
+                                        .clamp_min(0.0).sqrt()
+                                        .unsqueeze(-1))        # (R, b^2, 1)
+                            sim = torch.cat(
+                                [sim,
+                                 mu_i + std_i * torch.randn(
+                                     mu_i.shape, generator=sample_gen,
+                                     device=device)], dim=1)
+                            pos = torch.cat([pos, w_i], dim=1)
+                            occ[rows_ar(R), w_i] = True
+                            sig = sigma_head(sigma_predictor(
+                                sim, [pos],
+                                [full_idx.unsqueeze(0).repeat(R, 1)]))
+                            if sig.dim() == 3:
+                                sig = sig.squeeze(-1)
+                        # score = total sigma over the still-unobserved patches
+                        # (occupancy includes the chain's simulated blocks)
+                        acc = acc + sig.masked_fill(occ, 0.0).sum(dim=1)
                 scores.append(acc / args.samples)
 
         scores = torch.cat(scores)                        # (rows,)
@@ -538,15 +633,21 @@ if __name__ == "__main__":
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    # K/H-tagged variant name: K=1, H=1 -> "lookahead_sample" (the pure
-    # one-step sampling variant), K>1 -> "lookahead_sample<K>",
-    # H>1 appends h<H> (e.g. K=1, H=2 -> "lookahead_sampleh2"; K=4, H=2 ->
-    # "lookahead_sample4h2") so every (K, H) artefact coexists
+    # K/H/branch-tagged variant name: K=1, H=1 -> "lookahead_sample" (the
+    # pure one-step sampling variant), K>1 -> "lookahead_sample<K>",
+    # H>1 appends h<H>, and full branching appends "fb"
+    # (e.g. K=1, H=2, greedy-inner -> "lookahead_sampleh2";
+    #       K=1, H=2, full branch -> "lookahead_sampleh2fb") so every
+    # (K, H, branch) artefact coexists
     if args.samples == 1:
         base = "lookahead_sample"
     else:
         base = f"lookahead_sample{args.samples}"
-    suffix = base if args.horizon == 1 else f"{base}h{args.horizon}"
+    if args.horizon > 1:
+        base = f"{base}h{args.horizon}"
+    if args.branch == "full" and args.horizon > 1:
+        base = f"{base}fb"
+    suffix = base
     with open(os.path.join(args.outdir,
               f"block_{block_size}_tmax_{T}_test_{suffix}.json",
               ), "w") as f:
@@ -557,7 +658,8 @@ if __name__ == "__main__":
     stats = {
         "meta": {"strategy": suffix, "b": block_size, "T": T,
                  "seed": args.seed, "start": "random", "topk": args.topk,
-                 "samples": args.samples, "horizon": args.horizon, "N": N},
+                 "samples": args.samples, "horizon": args.horizon,
+                 "branch": args.branch, "N": N},
         "sigma_sum": sigma_sum_traj,
         "chosen_sigma_rank": chosen_rank,
         "n_valid_anchors": n_valid_traj,
@@ -568,4 +670,5 @@ if __name__ == "__main__":
         json.dump(stats, f)
 
     print(f"saved selection+stats -> {args.outdir} "
-          f"({suffix}, samples={args.samples}, horizon={args.horizon})")
+          f"({suffix}, samples={args.samples}, horizon={args.horizon}, "
+          f"branch={args.branch})")
