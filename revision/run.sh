@@ -75,17 +75,21 @@
 #                          (K=1, H=2 -> ..._test_lookahead_sampleh2.json)
 #     TOPK=<k>             candidate pre-screen size (default 16); also the
 #                          level-2 branching width when BRANCH=full
-#     BRANCH=<greedy|full> inner-rollout rule for H>1 (default "full"):
+#     BRANCH=<greedy|full|fullseq> inner-rollout rule for H>1 (default "fullseq"):
 #                          "greedy" = 1 greedy block per simulated level,
 #                          "full" (H=2 only) = enumerate ALL topk level-2
-#                          blocks per level-1 candidate and score by the
-#                          minimum residual sigma (exact 2-step objective;
-#                          ~8.5x the greedy cost, ~1.5-2 days selection).
-#                          In full mode the argmin level-2 block is
-#                          OBSERVED for real together with the level-1
-#                          winner (2 blocks per step: "pair" strategy;
-#                          "pair"-tagged artefact names, e.g.
-#                          lookahead_sampleh2pair for K=1/H=2).
+#                          blocks per chain's own SIMULATED map and score a
+#                          level-1 candidate by the minimum residual
+#                          (sample-then-optimize; "pair"-tagged).
+#                          "fullseq" (H=2 only, PAPER-EXACT) fixes the
+#                          candidate sequence set BEFORE sampling (c2 = top-M2
+#                          of the deterministic MEAN-context sigma map) and
+#                          scores each (c1, c2) sequence by the residual of
+#                          one sampled rollout (the paper's J-hat_K with K=1),
+#                          then executes the argmin sequence as the pair.
+#                          In both full/fullseq the argmin level-2 block is
+#                          OBSERVED alongside the level-1 winner (2 blocks
+#                          per step; "pair"/"seq"-tagged artefact names).
 #     MAX_T=<n>            cap the selection horizon for smoke tests
 #                          (the actual tmax is in the JSON names, so smoke
 #                          artefacts never collide with full-run ones)
@@ -105,7 +109,7 @@ BATCH=${BATCH:-64}
 SEEDS=${SEEDS:-"0 1 2 3 4"}
 SAMPLES=${SAMPLES:-"1"}
 HORIZON=${HORIZON:-"2"}
-BRANCH=${BRANCH:-full}
+BRANCH=${BRANCH:-fullseq}
 TOPK=${TOPK:-16}
 SEL_ROOT=${SEL_ROOT:-selected_patch_index_lookahead_sample}
 EVAL_ROOT=${EVAL_ROOT:-images/rec_image_lookahead_sample}
@@ -155,6 +159,8 @@ for SEED in $SEEDS; do
                 fi
                 if [ "$BRANCH" = "full" ] && [ "$H" != "1" ]; then
                     VAR="${VAR}pair"
+                elif [ "$BRANCH" = "fullseq" ] && [ "$H" != "1" ]; then
+                    VAR="${VAR}seq"
                 fi
                 echo "### seed $SEED, b=$b, samples=$K, horizon=$H, branch=$BRANCH (variant: $VAR)"
                 "$PY" select_and_save_patch_index_lookahead_sample.py \

@@ -145,15 +145,18 @@ parser.add_argument(
          'remaining sigma after the whole chain. Names are h<H>-tagged for '
          'H>1. Cost per row-chunk: 1 mu + K*(H sigma + (H-1) mu) forwards')
 parser.add_argument(
-    '--branch', type=str, default='greedy', choices=['greedy', 'full'],
+    '--branch', type=str, default='greedy', choices=['greedy', 'full', 'fullseq'],
     help='inner-rollout rule for horizon>1: "greedy" (default) picks ONE '
          'block per simulated level from the simulated sigma map; "full" '
-         '(H=2 only) enumerates ALL --topk level-2 blocks per level-1 '
-         'candidate (topk^2 rows per image-step, ~8.5x the greedy cost) '
-         'and scores a level-1 candidate by the minimum residual sigma over '
-         'its leaves (the exact two-step objective). Moreover the chosen '
-         'best level-2 block is OBSERVED alongside the level-1 winner: the '
-         'selection advances 2 blocks per real step ("pair" variant)')
+         '(H=2 only) enumerates the top-M2 level-2 blocks of each chain\'s '
+         'own SIMULATED map (c2 set depends on the sample) and scores a '
+         'level-1 candidate by the minimum residual sigma over its leaves '
+         '(sample-then-optimize); "fullseq" (H=2 only, PAPER-EXACT) fixes '
+         'the candidate sequence set BEFORE sampling - c2 = top-M2 of the '
+         'sigma map of the deterministic MEAN context [obs, mu1(c1)] - and '
+         'scores each (c1, c2) sequence by the residual of one sampled '
+         'rollout (the paper\'s J-hat_K with K=1), then executes the argmin '
+         'sequence (c1 + its best c2) as the pair')
 parser.add_argument(
     '--batch_size', type=int, default=64,
     help='rows (image x candidate) forwarded together; selection is '
@@ -180,9 +183,12 @@ if __name__ == "__main__":
         parser.error("--samples must be >= 1")
     if args.horizon < 1:
         parser.error("--horizon must be >= 1")
-    if args.branch == "full" and args.horizon != 2:
-        parser.error("--branch full requires --horizon 2 (topk^H explodes "
-                     "for H>=3; H=1 has no inner level to branch)")
+    if args.branch in ("full", "fullseq") and args.horizon != 2:
+        parser.error("--branch full/fullseq requires --horizon 2 (topk^H "
+                     "explodes for H>=3; H=1 has no inner level to branch)")
+    if args.branch == "fullseq" and args.samples != 1:
+        parser.error("--branch fullseq is implemented for samples=1 "
+                     "(K=1) only; use --branch full for the K>1 variant")
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -544,6 +550,100 @@ if __name__ == "__main__":
                                 include_self=True)
                         acc = acc + chain_min
                     pair_c2[r0:r0 + R] = pair_c2_local
+                elif args.horizon > 1 and args.branch == "fullseq":
+                    # ---------- PAPER-EXACT FIXED SEQUENCE SET (J-hat_K) -------
+                    # Candidate SEQUENCES (c1, c2) are FIXED before sampling:
+                    # c2 = top-M2 of the sigma map of the DETERMINISTIC mean
+                    # context [obs, mu1(c1)]. Each sequence is scored by the
+                    # residual of K sampled rollouts (K=1 here; K>1 would average
+                    # chains), and the argmin sequence (c1 + its c2) is executed
+                    # as the pair. This keeps the c2 candidate set independent of
+                    # the sample and K-independent per sequence, matching the
+                    # paper's J-hat_K(B) definition (K=1; paper-exact).
+                    pos1 = torch.cat([ctx_t, cand_idx], dim=1)
+                    pair_c2_local = [None] * R
+                    # deterministic mean-context sigma map (chain-independent)
+                    sim_mean = torch.cat([x_ctx, mu1], dim=1)
+                    sig_mean = sigma_head(sigma_predictor(
+                        sim_mean, [pos1],
+                        [full_idx.unsqueeze(0).repeat(R, 1)]))
+                    if sig_mean.dim() == 3:
+                        sig_mean = sig_mean.squeeze(-1)       # (R, 196)
+                    occ1 = occ0.clone()
+                    occ1[rows_ar(R), cand_idx] = True
+                    overlap = occ1[:, windows_t].any(dim=2)
+                    have = ~overlap                   # (R, n_pos^2)
+                    pooled_mean = (F.avg_pool2d(
+                        sig_mean.reshape(-1, 1, 14, 14),
+                        kernel_size=block_size, stride=1)
+                        .reshape(R, n_pos, n_pos)
+                        .transpose(1, 2).reshape(R, -1))
+                    pooled_mean = pooled_mean.masked_fill(~have, float("-inf"))
+                    rows2, c2list = [], []
+                    for r1 in range(R):
+                        kk = int(min(args.topk, have[r1].sum().item()))
+                        if kk == 0:
+                            continue   # no valid inner block for this leaf
+                        sel = torch.topk(pooled_mean[r1], kk).indices.tolist()
+                        rows2.extend([r1] * kk)
+                        c2list.extend(sel)
+                    # fallback residual on the level-1 map (no valid inner block)
+                    chain_min = sig_mean.masked_fill(occ1, 0.0).sum(dim=1)
+                    if rows2:
+                        r1_idx = torch.tensor(rows2, dtype=torch.long,
+                                              device=device)
+                        w2 = windows_t[torch.tensor(
+                            c2list, dtype=torch.long, device=device)]
+                        # one sampled rollout (K=1; chain rule): f1 sampled from
+                        # the CURRENT sigma map, then f2 sampled using the
+                        # simulated map's sigma at the candidate (variance)
+                        eps1 = torch.randn(mu1.shape, generator=sample_gen,
+                                           device=device)
+                        f1 = mu1 + std1 * eps1
+                        sim1 = torch.cat([x_ctx, f1], dim=1)
+                        sig1 = sigma_head(sigma_predictor(
+                            sim1, [pos1],
+                            [full_idx.unsqueeze(0).repeat(R, 1)]))
+                        if sig1.dim() == 3:
+                            sig1 = sig1.squeeze(-1)       # (R, 196)
+                        sim_base = sim1[r1_idx]           # (L, k+b^2, D)
+                        pos1_exp = pos1[r1_idx]            # (L, k+b^2)
+                        sig1_exp = sig1[r1_idx]            # (L, 196)
+                        mu2 = predictor(sim_base, [pos1_exp], [w2])
+                        std2 = (sig1_exp.gather(1, w2)
+                                .clamp_min(0.0).sqrt().unsqueeze(-1))
+                        leaf = torch.cat(
+                            [sim_base,
+                             mu2 + std2 * torch.randn(
+                                 mu2.shape, generator=sample_gen,
+                                 device=device)], dim=1)
+                        pos2 = torch.cat([pos1_exp, w2], dim=1)
+                        occ2 = occ1[r1_idx]
+                        sig2 = sigma_head(sigma_predictor(
+                            leaf, [pos2],
+                            [full_idx.unsqueeze(0).repeat(occ2.shape[0], 1)]))
+                        if sig2.dim() == 3:
+                            sig2 = sig2.squeeze(-1)
+                        leaf_occ = occ2.clone()
+                        leaf_occ[rows_ar(occ2.shape[0]), w2] = True
+                        leaf_score = sig2.masked_fill(leaf_occ, 0).sum(1)
+                        # residual-argmin c2 per level-1 row -> the second block
+                        # of the actually observed pair
+                        i = 0
+                        while i < len(rows2):
+                            r1 = rows2[i]
+                            j = i
+                            while j < len(rows2) and rows2[j] == r1:
+                                j += 1
+                            m = min(range(i, j),
+                                    key=lambda t: float(leaf_score[t]))
+                            pair_c2_local[r1] = c2list[m]
+                            i = j
+                        chain_min.scatter_reduce_(
+                            0, r1_idx, leaf_score, reduce="amin",
+                            include_self=True)
+                    acc = acc + chain_min
+                    pair_c2[r0:r0 + R] = pair_c2_local
                 else:
                     # ---------- greedy-inner cascade (default) ------------
                     for _ in range(args.samples):
@@ -617,7 +717,7 @@ if __name__ == "__main__":
             # pair mode (--branch full, horizon > 1): the argmin level-2
             # block computed for this rollout is observed as well, so the
             # selection advances 2 blocks per real step
-            if args.horizon > 1 and args.branch == "full":
+            if args.horizon > 1 and args.branch in ("full", "fullseq"):
                 c2a = pair_c2[row1]
                 if c2a is not None:
                     win2 = anchor_windows[c2a]
@@ -687,10 +787,12 @@ if __name__ == "__main__":
         base = "lookahead_sample"
     else:
         base = f"lookahead_sample{args.samples}"
-    if args.horizon > 1:
+    if args.horizon > 1 and args.branch in ("full", "fullseq"):
         base = f"{base}h{args.horizon}"
     if args.branch == "full" and args.horizon > 1:
         base = f"{base}pair"
+    elif args.branch == "fullseq" and args.horizon > 1:
+        base = f"{base}seq"
     suffix = base
     with open(os.path.join(args.outdir,
               f"block_{block_size}_tmax_{T}_test_{suffix}.json",
